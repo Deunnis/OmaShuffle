@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# omarchy:summary=List installed Omarchy themes with a small palette preview (read-only)
+#
+# Emits a JSON array, one object per installed theme:
+#   { "slug", "source" ("user"|"system"), "display", "accent", "background",
+#     "foreground", "colors": [hex, ...] }
+#
+# Themes are read from the two standard locations. A user theme shadows a
+# system theme with the same slug. Only colors.toml is read, and only hex
+# values are taken from it - nothing here executes or writes anything.
+
+set -euo pipefail
+
+SYSTEM_DIR="${OMARCHY_PATH:-/usr/share/omarchy}/themes"
+USER_DIR="$HOME/.config/omarchy/themes"
+
+# slug charset guard - matches omarchy-theme-set's own rules
+valid_slug() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]*$ ]]; }
+
+# read one hex value for a key from a colors.toml, empty if absent/malformed
+toml_hex() {
+  local file="$1" key="$2" line
+  [[ -f $file ]] || return 0
+  line=$(grep -m1 -E "^[[:space:]]*${key}[[:space:]]*=" "$file" 2>/dev/null || true)
+  if [[ $line =~ \"(#[0-9a-fA-F]{3,8})\" ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+  return 0
+}
+
+# title-case a slug: "tokyo-night" -> "Tokyo Night"
+display_name() {
+  local slug="$1" word out=""
+  IFS='-_' read -ra parts <<<"$slug"
+  for word in "${parts[@]}"; do
+    [[ -z $word ]] && continue
+    out+="${word^} "
+  done
+  printf '%s' "${out% }"
+}
+
+declare -A SEEN=()
+first=1
+printf '['
+
+emit_dir() {
+  local base="$1" source="$2" d slug colors_file accent bg fg swatch
+  [[ -d $base ]] || return 0
+  for d in "$base"/*/; do
+    [[ -d $d ]] || continue
+    slug=$(basename "$d")
+    valid_slug "$slug" || continue
+    [[ -n ${SEEN[$slug]:-} ]] && continue
+    SEEN[$slug]=1
+
+    colors_file="$d/colors.toml"
+    accent=$(toml_hex "$colors_file" accent)
+    bg=$(toml_hex "$colors_file" background)
+    fg=$(toml_hex "$colors_file" foreground)
+
+    swatch=""
+    local k
+    for k in red green blue yellow magenta cyan; do
+      local v
+      v=$(toml_hex "$colors_file" "$k")
+      [[ -n $v ]] || continue
+      [[ -n $swatch ]] && swatch+=","
+      swatch+="\"$v\""
+    done
+
+    [[ $first -eq 1 ]] || printf ','
+    first=0
+    printf '{"slug":"%s","source":"%s","display":"%s","accent":"%s","background":"%s","foreground":"%s","colors":[%s]}' \
+      "$slug" "$source" "$(display_name "$slug")" "$accent" "$bg" "$fg" "$swatch"
+  done
+}
+
+emit_dir "$USER_DIR" user
+emit_dir "$SYSTEM_DIR" system
+
+printf ']\n'

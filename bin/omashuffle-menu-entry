@@ -1,0 +1,161 @@
+#!/bin/bash
+
+# omarchy:summary=Open the OmaShuffle theme picker, or manage its menu row
+# omarchy:group=omashuffle
+#
+# Companion to OmaShuffle's Omarchy-menu row. On --install it copies itself
+# into ~/.config/omarchy/extensions/ (so the row keeps working even after the
+# plugin is disabled or removed) and adds a "Style > Theme Shuffle" row. With
+# no arguments it opens the picker, or - if the plugin is gone - takes its own
+# stale row back out. Nothing here runs with elevated privileges.
+
+set -euo pipefail
+
+PLUGIN_ID='io.github.omashuffle'
+ROW_ID='style.omashuffle'
+EXT_DIR="${OMARCHY_MENU_EXTENSION_DIR:-$HOME/.config/omarchy/extensions}"
+EXT_FILE="${OMARCHY_MENU_EXTENSION:-$EXT_DIR/omarchy-menu.jsonc}"
+SELF_COPY="$EXT_DIR/omashuffle-menu-entry"
+ICON=$(printf '\U000f050e')
+
+usage() { echo "Usage: omashuffle-menu-entry [--install | --remove]"; }
+
+plugin_enabled() {
+  command -v omarchy-plugin-list >/dev/null 2>&1 || return 1
+  omarchy-plugin-list 2>/dev/null | awk -v id="$PLUGIN_ID" '$1 == id { print $2 }' | grep -qx 'enabled'
+}
+
+row_present() {
+  [[ -f $EXT_FILE ]] && grep -q "\"$ROW_ID\"" "$EXT_FILE"
+}
+
+row_line() {
+  printf '  "%s": {"icon":"%s","label":"Theme Shuffle","aliases":["shuffle","theme-shuffle","omashuffle"],"description":"Rotate Omarchy themes on every boot","action":"%s"}' \
+    "$ROW_ID" "$ICON" "$SELF_COPY"
+}
+
+install_self_copy() {
+  mkdir -p "$EXT_DIR"
+  if [[ ${BASH_SOURCE[0]} -ef $SELF_COPY ]]; then
+    return 0
+  fi
+  if cmp -s "${BASH_SOURCE[0]}" "$SELF_COPY"; then
+    return 0
+  fi
+  cp -f "${BASH_SOURCE[0]}" "$SELF_COPY"
+  chmod +x "$SELF_COPY"
+}
+
+add_row() {
+  row_present && return 0
+
+  if [[ ! -f $EXT_FILE ]]; then
+    mkdir -p "$EXT_DIR"
+    { printf '{\n'; row_line; printf '\n}\n'; } > "$EXT_FILE"
+    return 0
+  fi
+
+  cp -f "$EXT_FILE" "$EXT_FILE.omashuffle.bak" 2>/dev/null || true
+
+  # Line number of the final closing brace.
+  local close
+  close=$(grep -n '^[[:space:]]*}[[:space:]]*$' "$EXT_FILE" | tail -n1 | cut -d: -f1 || true)
+  if [[ -z $close ]]; then
+    # No recognisable closing brace on its own line - append safely instead.
+    printf '\n' >>"$EXT_FILE"
+    row_line >>"$EXT_FILE"
+    printf '\n' >>"$EXT_FILE"
+    return 0
+  fi
+
+  # Walk back from the brace to the previous meaningful line; if it is an
+  # entry (not the opening "{" and not already comma-terminated), add a comma.
+  local prev
+  prev=$((close - 1))
+  while (( prev > 0 )); do
+    local content trimmed
+    content=$(sed -n "${prev}p" "$EXT_FILE")
+    trimmed=$(printf '%s' "$content" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [[ -z $trimmed || ${trimmed:0:1} == '/' || ${trimmed:0:1} == '*' ]]; then
+      prev=$((prev - 1)); continue
+    fi
+    if [[ $trimmed != '{' && ${trimmed: -1} != ',' ]]; then
+      sed -i "${prev}s/[[:space:]]*$/,/" "$EXT_FILE"
+    fi
+    break
+  done
+
+  local tmp
+  tmp=$(mktemp)
+  { head -n $((close - 1)) "$EXT_FILE"; row_line; printf '\n'; tail -n +"$close" "$EXT_FILE"; } >"$tmp"
+  mv "$tmp" "$EXT_FILE"
+}
+
+remove_row() {
+  [[ -f $EXT_FILE ]] || return 0
+  local line
+  line=$(grep -n "\"$ROW_ID\"" "$EXT_FILE" | head -n1 | cut -d: -f1 || true)
+  [[ -n $line ]] || return 0
+
+  # Only reclaim a row this plugin owns.
+  local rowline
+  rowline=$(sed -n "${line}p" "$EXT_FILE")
+  if [[ $rowline != *omashuffle* ]]; then
+    return 0
+  fi
+
+  cp -f "$EXT_FILE" "$EXT_FILE.omashuffle.bak" 2>/dev/null || true
+  sed -i "${line}d" "$EXT_FILE"
+
+  # If our row was last, drop the now-trailing comma on the preceding entry.
+  local total
+  total=$(wc -l <"$EXT_FILE")
+  local was_last=1
+  if (( line <= total )); then
+    local after trimmed_after
+    after=$(sed -n "${line}p" "$EXT_FILE")
+    trimmed_after=$(printf '%s' "$after" | sed 's/^[[:space:]]*//')
+    if [[ -n $trimmed_after && ${trimmed_after:0:1} != '}' && ${trimmed_after:0:1} != '/' && ${trimmed_after:0:1} != '*' ]]; then
+      was_last=0
+    fi
+  fi
+  if (( was_last )); then
+    local prev=$((line - 1))
+    while (( prev > 0 )); do
+      local content trimmed
+      content=$(sed -n "${prev}p" "$EXT_FILE")
+      trimmed=$(printf '%s' "$content" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+      if [[ -z $trimmed || ${trimmed:0:1} == '/' || ${trimmed:0:1} == '*' ]]; then
+        prev=$((prev - 1)); continue
+      fi
+      if [[ $trimmed != '{' && ${trimmed: -1} == ',' ]]; then
+        sed -i "${prev}s/,[[:space:]]*$//" "$EXT_FILE"
+      fi
+      break
+    done
+  fi
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --install)
+    install_self_copy
+    add_row
+    exit 0
+    ;;
+  --remove|--uninstall)
+    remove_row
+    exit 0
+    ;;
+  "")
+    if plugin_enabled; then
+      exec omarchy-shell shell toggle "$PLUGIN_ID"
+    fi
+    remove_row
+    command -v omarchy-notification-send >/dev/null 2>&1 && \
+      omarchy-notification-send "OmaShuffle" "Plugin is disabled — menu entry removed" -t 4000 >/dev/null 2>&1 || true
+    exit 0
+    ;;
+  *)
+    usage; exit 1 ;;
+esac
