@@ -399,6 +399,12 @@ Item {
   function close() { root.opened = false }
   function toggle() { if (root.opened) root.close(); else root.open("{}") }
 
+  // Open straight to the settings pane (menu sub-entry / keybind convenience).
+  function settings() {
+    root.open("{}")
+    root.settingsOpen = true
+  }
+
   // ============================================================ UI
 
   PanelWindow {
