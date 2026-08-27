@@ -85,10 +85,11 @@ add_row() {
     break
   done
 
-  local tmp
-  tmp=$(mktemp)
-  { head -n $((close - 1)) "$EXT_FILE"; row_line; printf '\n'; tail -n +"$close" "$EXT_FILE"; } >"$tmp"
-  mv "$tmp" "$EXT_FILE"
+  # Rewrite in place with a plain redirect so the file keeps its inode and
+  # permissions (mktemp+mv would hand it mktemp's 0600).
+  local content
+  content=$( { head -n $((close - 1)) "$EXT_FILE"; row_line; printf '\n'; tail -n +"$close" "$EXT_FILE"; } )
+  printf '%s\n' "$content" >"$EXT_FILE"
 }
 
 remove_row() {
