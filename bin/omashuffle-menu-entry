@@ -1,163 +1,274 @@
-#!/bin/bash
+#!/usr/bin/env python3
 
 # omarchy:summary=Open the OmaShuffle theme picker, or manage its menu row
 # omarchy:group=omashuffle
 #
 # Companion to OmaShuffle's Omarchy-menu row. `--add` copies this script into
-# ~/.config/omarchy/extensions/ (so the row keeps working even after the plugin
-# is disabled or removed) and adds a "Style > Theme Shuffle" row. `--remove`
-# takes it back out. With no arguments it opens the picker, or - if the plugin
-# is gone - removes its own stale row. Runs entirely as the current user.
+# ~/.config/omarchy/extensions/ (so the row keeps working after the plugin is
+# disabled or removed) and adds a "Style > Theme Shuffle" row. `--remove` takes
+# it back out. With no arguments it opens the picker, or - if the plugin is gone
+# - removes its own stale row.
+#
+# Every file touched here is opened as a bounded, regular, non-symlink file and
+# every write goes to a fresh O_EXCL temp inode in a verified directory that is
+# then atomically renamed over the target (never written through). Runs entirely
+# as the current user; no elevation, no network.
 
-set -euo pipefail
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
 
-PLUGIN_ID='io.github.omashuffle'
-ROW_ID='style.omashuffle'
-EXT_DIR="${OMARCHY_MENU_EXTENSION_DIR:-$HOME/.config/omarchy/extensions}"
-EXT_FILE="${OMARCHY_MENU_EXTENSION:-$EXT_DIR/omarchy-menu.jsonc}"
-SELF_COPY="$EXT_DIR/omashuffle-menu-entry"
-ICON=$(printf '\U000f050e')
+PLUGIN_ID = "io.github.omashuffle"
+ROW_ID = "style.omashuffle"
+HOME = os.path.expanduser("~")
+EXT_DIR = os.environ.get("OMASHUFFLE_EXT_DIR", os.path.join(HOME, ".config", "omarchy", "extensions"))
+MENU_FILE = os.environ.get("OMASHUFFLE_MENU_FILE", os.path.join(EXT_DIR, "omarchy-menu.jsonc"))
+SELF_COPY_NAME = "omashuffle-menu-entry"
 
-usage() { echo "Usage: omashuffle-menu-entry [--add | --remove]"; }
+MAX_MENU_BYTES = 1024 * 1024
+MAX_SELF_BYTES = 512 * 1024
+ICON = "\U000f050e"
 
-plugin_enabled() {
-  command -v omarchy-plugin-list >/dev/null 2>&1 || return 1
-  omarchy-plugin-list 2>/dev/null | awk -v id="$PLUGIN_ID" '$1 == id { print $2 }' | grep -qx 'enabled'
-}
+ROW = (
+    '  "%s": {"icon":"%s","label":"Theme Shuffle",'
+    '"aliases":["shuffle","theme-shuffle","omashuffle"],'
+    '"description":"Rotate Omarchy themes on every boot",'
+    '"action":"%s"}'
+) % (ROW_ID, ICON, os.path.join(EXT_DIR, SELF_COPY_NAME))
 
-row_present() {
-  [[ -f $EXT_FILE ]] && grep -q "\"$ROW_ID\"" "$EXT_FILE"
-}
 
-row_line() {
-  printf '  "%s": {"icon":"%s","label":"Theme Shuffle","aliases":["shuffle","theme-shuffle","omashuffle"],"description":"Rotate Omarchy themes on every boot","action":"%s"}' \
-    "$ROW_ID" "$ICON" "$SELF_COPY"
-}
+def fail(msg, code=1):
+    sys.stderr.write("omashuffle-menu-entry: %s\n" % msg)
+    sys.exit(code)
 
-copy_self_to_ext() {
-  mkdir -p "$EXT_DIR"
-  if [[ ${BASH_SOURCE[0]} -ef $SELF_COPY ]]; then
-    return 0
-  fi
-  if cmp -s "${BASH_SOURCE[0]}" "$SELF_COPY"; then
-    return 0
-  fi
-  cp -f "${BASH_SOURCE[0]}" "$SELF_COPY"
-  chmod +x "$SELF_COPY"
-}
 
-add_row() {
-  row_present && return 0
+def read_regular(path, limit):
+    """Bounded read of a regular file. Never follows a symlink at the final
+    component, never blocks on a FIFO. Returns bytes, or None if absent."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        fail("cannot open %s (%s)" % (path, exc.strerror))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fail("%s is not a regular file - refusing to touch it" % path)
+        chunks, total = [], 0
+        while total <= limit:
+            try:
+                b = os.read(fd, (limit + 1) - total)
+            except BlockingIOError:
+                break
+            if not b:
+                break
+            chunks.append(b)
+            total += len(b)
+        if total > limit:
+            fail("%s exceeds %d bytes - refusing to touch it" % (path, limit))
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
-  if [[ ! -f $EXT_FILE ]]; then
-    mkdir -p "$EXT_DIR"
-    { printf '{\n'; row_line; printf '\n}\n'; } > "$EXT_FILE"
-    return 0
-  fi
 
-  # Line number of the final closing brace on its own line.
-  local close
-  close=$(grep -n '^[[:space:]]*}[[:space:]]*$' "$EXT_FILE" | tail -n1 | cut -d: -f1 || true)
-  if [[ -z $close ]]; then
-    # Unfamiliar layout - do not risk corrupting the user's menu. Bail with a
-    # pointer to the manual one-liner (also in the plugin README).
-    echo "omashuffle-menu-entry: could not safely edit $EXT_FILE" >&2
-    echo "Add this line yourself, before the closing brace:" >&2
-    echo "$(row_line)," >&2
+def verified_ext_dir():
+    """Return EXT_DIR after confirming it is a real directory (not a symlink)
+    owned by us. Creates it if missing."""
+    try:
+        os.makedirs(EXT_DIR, exist_ok=True)
+    except OSError as exc:
+        fail("cannot create %s (%s)" % (EXT_DIR, exc.strerror))
+    st = os.lstat(EXT_DIR)
+    if not stat.S_ISDIR(st.st_mode):
+        fail("%s is not a real directory" % EXT_DIR)
+    if st.st_uid != os.getuid():
+        fail("%s is not owned by you" % EXT_DIR)
+    return EXT_DIR
+
+
+def atomic_write(target_path, data, mode=0o644):
+    """Write `data` to a fresh O_EXCL temp inode in the target's directory,
+    then rename it over the target. os.replace does not follow a symlink at
+    the destination - it replaces the link itself."""
+    directory = os.path.dirname(target_path)
+    dst = os.lstat(directory)
+    if not stat.S_ISDIR(dst.st_mode) or dst.st_uid != os.getuid():
+        fail("%s is not a real directory owned by you" % directory)
+    fd, tmp = tempfile.mkstemp(prefix=".omashuffle-", dir=directory)
+    try:
+        os.write(fd, data)
+        os.fchmod(fd, mode)
+        os.close(fd)
+        fd = -1
+        os.replace(tmp, target_path)
+    except BaseException:
+        if fd != -1:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------- jsonc editing
+
+def meaningful(line):
+    s = line.strip()
+    return s and not s.startswith(("//", "/*", "*"))
+
+
+def with_row_added(text):
+    """Insert ROW before the final `}` that sits on its own line. Returns the
+    new text, or None if the layout is not one we can edit safely."""
+    if ('"%s"' % ROW_ID) in text:
+        return text  # already present
+    lines = text.splitlines()
+    close = None
+    for i in range(len(lines) - 1, -1, -1):
+        if re.match(r"^\s*}\s*$", lines[i]):
+            close = i
+            break
+    if close is None:
+        return None
+    # add a comma to the previous entry if it needs one
+    for j in range(close - 1, -1, -1):
+        if not meaningful(lines[j]):
+            continue
+        s = lines[j].rstrip()
+        if s.strip() != "{" and not s.endswith(","):
+            lines[j] = s + ","
+        break
+    lines[close:close] = [ROW]
+    return "\n".join(lines) + "\n"
+
+
+def with_row_removed(text):
+    """Drop our row line (and fix a now-trailing comma). Returns new text, or
+    None if our row is not present / not ours."""
+    lines = text.splitlines()
+    idx = None
+    for i, line in enumerate(lines):
+        if ('"%s"' % ROW_ID) in line:
+            if "omashuffle" not in line:  # a user-redefined row - leave it
+                return None
+            idx = i
+            break
+    if idx is None:
+        return None
+    was_last = True
+    for k in range(idx + 1, len(lines)):
+        s = lines[k].strip()
+        if not s or s.startswith(("//", "/*", "*")):
+            continue
+        was_last = s.startswith("}")  # another entry follows -> we were not last
+        break
+    del lines[idx]
+    if was_last:
+        for j in range(idx - 1, -1, -1):
+            if not meaningful(lines[j]):
+                continue
+            s = lines[j].rstrip()
+            if s.strip() != "{" and s.endswith(","):
+                lines[j] = s[:-1]
+            break
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------- actions
+
+def copy_self_to_ext():
+    verified_ext_dir()
+    dest = os.path.join(EXT_DIR, SELF_COPY_NAME)
+    src = os.path.realpath(__file__)
+    if os.path.realpath(dest) == src:
+        return
+    data = read_regular(src, MAX_SELF_BYTES)
+    if data is None:
+        fail("cannot read own source at %s" % src)
+    existing = read_regular(dest, MAX_SELF_BYTES)
+    if existing == data:
+        return
+    atomic_write(dest, data, mode=0o755)
+
+
+def do_add():
+    copy_self_to_ext()
+    raw = read_regular(MENU_FILE, MAX_MENU_BYTES)
+    if raw is None:
+        verified_ext_dir()
+        atomic_write(MENU_FILE, ("{\n%s\n}\n" % ROW).encode("utf-8"))
+        return
+    text = raw.decode("utf-8", "replace")
+    updated = with_row_added(text)
+    if updated is None:
+        sys.stderr.write(
+            "omashuffle-menu-entry: %s has an unfamiliar layout - not editing it.\n"
+            "Add this line yourself, before the closing brace:\n%s,\n" % (MENU_FILE, ROW)
+        )
+        sys.exit(1)
+    if updated != text:
+        atomic_write(MENU_FILE, updated.encode("utf-8"))
+
+
+def do_remove():
+    raw = read_regular(MENU_FILE, MAX_MENU_BYTES)
+    if raw is None:
+        return
+    text = raw.decode("utf-8", "replace")
+    updated = with_row_removed(text)
+    if updated is not None and updated != text:
+        atomic_write(MENU_FILE, updated.encode("utf-8"))
+
+
+def plugin_enabled():
+    try:
+        out = subprocess.run(
+            ["omarchy-plugin-list"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == PLUGIN_ID:
+            return parts[1] == "enabled"
+    return False
+
+
+def notify(text):
+    try:
+        subprocess.run(
+            ["omarchy-notification-send", "-t", "4000", "OmaShuffle", text],
+            capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def main(argv):
+    arg = argv[1] if len(argv) > 1 else ""
+    if arg in ("-h", "--help"):
+        print("Usage: omashuffle-menu-entry [--add | --remove]")
+        return 0
+    if arg == "--add":
+        do_add()
+        return 0
+    if arg == "--remove":
+        do_remove()
+        return 0
+    if arg == "":
+        if plugin_enabled():
+            os.execvp("omarchy-shell", ["omarchy-shell", "shell", "toggle", PLUGIN_ID])
+        do_remove()
+        notify("Plugin is disabled - menu entry removed")
+        return 0
+    print("Usage: omashuffle-menu-entry [--add | --remove]", file=sys.stderr)
     return 1
-  fi
 
-  cp -f "$EXT_FILE" "$EXT_FILE.omashuffle.bak" 2>/dev/null || true
 
-  # Walk back from the brace to the previous meaningful line; if it is an
-  # entry (not the opening "{" and not already comma-terminated), add a comma.
-  local prev
-  prev=$((close - 1))
-  while (( prev > 0 )); do
-    local content trimmed
-    content=$(sed -n "${prev}p" "$EXT_FILE")
-    trimmed=$(printf '%s' "$content" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-    if [[ -z $trimmed || ${trimmed:0:1} == '/' || ${trimmed:0:1} == '*' ]]; then
-      prev=$((prev - 1)); continue
-    fi
-    if [[ $trimmed != '{' && ${trimmed: -1} != ',' ]]; then
-      sed -i "${prev}s/[[:space:]]*$/,/" "$EXT_FILE"
-    fi
-    break
-  done
-
-  # Rewrite in place with a plain redirect so the file keeps its inode and
-  # permissions (mktemp+mv would hand it mktemp's 0600).
-  local content
-  content=$( { head -n $((close - 1)) "$EXT_FILE"; row_line; printf '\n'; tail -n +"$close" "$EXT_FILE"; } )
-  printf '%s\n' "$content" >"$EXT_FILE"
-}
-
-remove_row() {
-  [[ -f $EXT_FILE ]] || return 0
-  local line
-  line=$(grep -n "\"$ROW_ID\"" "$EXT_FILE" | head -n1 | cut -d: -f1 || true)
-  [[ -n $line ]] || return 0
-
-  # Only reclaim a row this plugin owns.
-  local rowline
-  rowline=$(sed -n "${line}p" "$EXT_FILE")
-  if [[ $rowline != *omashuffle* ]]; then
-    return 0
-  fi
-
-  cp -f "$EXT_FILE" "$EXT_FILE.omashuffle.bak" 2>/dev/null || true
-  sed -i "${line}d" "$EXT_FILE"
-
-  # If our row was last, drop the now-trailing comma on the preceding entry.
-  local total
-  total=$(wc -l <"$EXT_FILE")
-  local was_last=1
-  if (( line <= total )); then
-    local after trimmed_after
-    after=$(sed -n "${line}p" "$EXT_FILE")
-    trimmed_after=$(printf '%s' "$after" | sed 's/^[[:space:]]*//')
-    if [[ -n $trimmed_after && ${trimmed_after:0:1} != '}' && ${trimmed_after:0:1} != '/' && ${trimmed_after:0:1} != '*' ]]; then
-      was_last=0
-    fi
-  fi
-  if (( was_last )); then
-    local prev=$((line - 1))
-    while (( prev > 0 )); do
-      local content trimmed
-      content=$(sed -n "${prev}p" "$EXT_FILE")
-      trimmed=$(printf '%s' "$content" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-      if [[ -z $trimmed || ${trimmed:0:1} == '/' || ${trimmed:0:1} == '*' ]]; then
-        prev=$((prev - 1)); continue
-      fi
-      if [[ $trimmed != '{' && ${trimmed: -1} == ',' ]]; then
-        sed -i "${prev}s/,[[:space:]]*$//" "$EXT_FILE"
-      fi
-      break
-    done
-  fi
-}
-
-case "${1:-}" in
-  -h|--help) usage; exit 0 ;;
-  --add)
-    copy_self_to_ext
-    add_row
-    exit 0
-    ;;
-  --remove)
-    remove_row
-    exit 0
-    ;;
-  "")
-    if plugin_enabled; then
-      exec omarchy-shell shell toggle "$PLUGIN_ID"
-    fi
-    remove_row
-    command -v omarchy-notification-send >/dev/null 2>&1 && \
-      omarchy-notification-send -t 4000 "OmaShuffle" "Plugin is disabled - menu entry removed" >/dev/null 2>&1 || true
-    exit 0
-    ;;
-  *)
-    usage; exit 1 ;;
-esac
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

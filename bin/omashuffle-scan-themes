@@ -1,82 +1,115 @@
-#!/bin/bash
+#!/usr/bin/env python3
 
 # omarchy:summary=List installed Omarchy themes with a small palette preview (read-only)
 #
 # Emits a JSON array, one object per installed theme:
-#   { "slug", "source" ("user"|"system"), "display", "accent", "background",
-#     "foreground", "colors": [hex, ...] }
+#   {"slug","source"("user"|"system"),"display","accent","background","foreground","colors":[hex,...]}
 #
-# Themes are read from the two standard locations. A user theme shadows a
-# system theme with the same slug. Only colors.toml is read, and only hex
-# values are taken from it - nothing here executes or writes anything.
+# Themes are read from the two standard locations; a user theme shadows a system
+# theme with the same slug. Every read is bounded and descriptor-safe: a theme
+# (which may be an installed third-party repo) cannot make this block or grow the
+# shell. Nothing here executes or writes anything. On any trouble it prints "[]".
 
-set -euo pipefail
+import json
+import os
+import re
+import signal
+import stat
+import sys
 
-SYSTEM_DIR="${OMARCHY_PATH:-/usr/share/omarchy}/themes"
-USER_DIR="$HOME/.config/omarchy/themes"
+MAX_THEMES = 500          # far above any real installed-theme count
+MAX_SLUG = 128            # matches omarchy-theme-set's own id length cap
+MAX_COLORS_BYTES = 65536  # a colors.toml is a few hundred bytes; this is generous
+DEADLINE_SEC = 10
 
-# slug charset guard - matches omarchy-theme-set's own rules
-valid_slug() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]*$ ]]; }
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+HEX_LINE_RE = re.compile(r'^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*"(#[0-9A-Fa-f]{3,8})"', re.M)
+SWATCH_KEYS = ("red", "green", "blue", "yellow", "magenta", "cyan")
 
-# read one hex value for a key from a colors.toml, empty if absent/malformed
-toml_hex() {
-  local file="$1" key="$2" line
-  [[ -f $file ]] || return 0
-  line=$(grep -m1 -E "^[[:space:]]*${key}[[:space:]]*=" "$file" 2>/dev/null || true)
-  if [[ $line =~ \"(#[0-9a-fA-F]{3,8})\" ]]; then
-    printf '%s' "${BASH_REMATCH[1]}"
-  fi
-  return 0
-}
 
-# title-case a slug: "tokyo-night" -> "Tokyo Night"
-display_name() {
-  local slug="$1" word out=""
-  IFS='-_' read -ra parts <<<"$slug"
-  for word in "${parts[@]}"; do
-    [[ -z $word ]] && continue
-    out+="${word^} "
-  done
-  printf '%s' "${out% }"
-}
+def _give_up(*_):
+    sys.stdout.write("[]\n")
+    os._exit(0)
 
-declare -A SEEN=()
-first=1
-printf '['
 
-emit_dir() {
-  local base="$1" source="$2" d slug colors_file accent bg fg swatch
-  [[ -d $base ]] || return 0
-  for d in "$base"/*/; do
-    [[ -d $d ]] || continue
-    slug=$(basename "$d")
-    valid_slug "$slug" || continue
-    [[ -n ${SEEN[$slug]:-} ]] && continue
-    SEEN[$slug]=1
+def read_palette(path):
+    """Read at most MAX_COLORS_BYTES from a regular file, never following a
+    symlink and never blocking on a FIFO. Returns {key: hex}."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return {}
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return {}
+        chunks, total = [], 0
+        while total < MAX_COLORS_BYTES:
+            try:
+                b = os.read(fd, MAX_COLORS_BYTES - total)
+            except (BlockingIOError, OSError):
+                break
+            if not b:
+                break
+            chunks.append(b)
+            total += len(b)
+    finally:
+        os.close(fd)
+    text = b"".join(chunks).decode("utf-8", "replace")
+    out = {}
+    for key, value in HEX_LINE_RE.findall(text):
+        out.setdefault(key, value)
+    return out
 
-    colors_file="$d/colors.toml"
-    accent=$(toml_hex "$colors_file" accent)
-    bg=$(toml_hex "$colors_file" background)
-    fg=$(toml_hex "$colors_file" foreground)
 
-    swatch=""
-    local k
-    for k in red green blue yellow magenta cyan; do
-      local v
-      v=$(toml_hex "$colors_file" "$k")
-      [[ -n $v ]] || continue
-      [[ -n $swatch ]] && swatch+=","
-      swatch+="\"$v\""
-    done
+def display_name(slug):
+    return " ".join(w.capitalize() for w in re.split(r"[-_]", slug) if w)
 
-    [[ $first -eq 1 ]] || printf ','
-    first=0
-    printf '{"slug":"%s","source":"%s","display":"%s","accent":"%s","background":"%s","foreground":"%s","colors":[%s]}' \
-      "$slug" "$source" "$(display_name "$slug")" "$accent" "$bg" "$fg" "$swatch"
-  done
-}
 
-emit_dir "$USER_DIR" user
-emit_dir "$SYSTEM_DIR" system
+def main():
+    signal.signal(signal.SIGALRM, _give_up)
+    signal.alarm(DEADLINE_SEC)
 
-printf ']\n'
+    home = os.environ.get("HOME", "")
+    omarchy_path = os.environ.get("OMARCHY_PATH", "/usr/share/omarchy")
+    sources = [
+        (os.path.join(home, ".config", "omarchy", "themes"), "user"),
+        (os.path.join(omarchy_path, "themes"), "system"),
+    ]
+
+    themes = []
+    seen = set()
+    for base, source in sources:
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            if len(themes) >= MAX_THEMES:
+                break
+            if len(name) > MAX_SLUG or not SLUG_RE.match(name) or name in seen:
+                continue
+            themedir = os.path.join(base, name)
+            if not os.path.isdir(themedir):
+                continue
+            seen.add(name)
+            palette = read_palette(os.path.join(themedir, "colors.toml"))
+            themes.append({
+                "slug": name,
+                "source": source,
+                "display": display_name(name),
+                "accent": palette.get("accent", ""),
+                "background": palette.get("background", ""),
+                "foreground": palette.get("foreground", ""),
+                "colors": [palette[k] for k in SWATCH_KEYS if k in palette],
+            })
+
+    json.dump(themes, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        sys.stdout.write("[]\n")
+        sys.exit(0)

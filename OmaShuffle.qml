@@ -125,9 +125,11 @@ Item {
     }
   }
 
+  // current/theme.name lives under ~/.local/state, so read it with the same
+  // descriptor-pinned bounded reader as state.json rather than a bare `cat`.
   Process {
     id: currentNameProc
-    command: ["cat", root.currentNamePath]
+    command: ["python3", "-c", root.stateReaderScript, root.currentNamePath, "4096"]
     stdout: StdioCollector { id: currentNameOut; waitForEnd: true }
     onExited: function (code) {
       var live = code === 0 ? Deck.sanitizeSlug(String(currentNameOut.text || "").trim()) : ""
@@ -143,7 +145,8 @@ Item {
 
   Process {
     id: themeScanProc
-    command: [root.scanBin]
+    // Outer hard deadline; the scanner also self-bounds output and read sizes.
+    command: ["timeout", "-k", "2", "12", root.scanBin]
     stdout: StdioCollector { id: themeScanOut; waitForEnd: true }
     onExited: function (code) {
       if (code !== 0) { console.warn("OmaShuffle: theme scan exited " + code); return }
@@ -337,13 +340,20 @@ Item {
   function isHex(s) { return typeof s === "string" && /^#[0-9a-fA-F]{3,8}$/.test(s) }
   function hexOr(s, dflt) { return root.isHex(s) ? s : dflt }
 
+  readonly property int maxThemes: 600
+  readonly property int maxScanChars: 1048576
+
   function ingestThemes(raw) {
+    if (typeof raw !== "string" || raw.length > root.maxScanChars) {
+      console.warn("OmaShuffle: theme scan output missing or too large - ignoring")
+      return
+    }
     var arr = []
     try { arr = JSON.parse(raw) } catch (e) { arr = [] }
     if (!Array.isArray(arr)) arr = []
     var map = ({})
     var clean = []
-    for (var i = 0; i < arr.length; i++) {
+    for (var i = 0; i < arr.length && clean.length < root.maxThemes; i++) {
       var t = arr[i]
       var slug = Deck.sanitizeSlug(t && t.slug)
       if (!slug || map[slug]) continue

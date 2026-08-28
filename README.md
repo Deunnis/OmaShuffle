@@ -135,29 +135,35 @@ Delete the file to start over; disable the plugin to stop entirely.
 ## Notes for reviewers
 
 - **No network. No privileged calls.** The plugin runs `omarchy theme set`,
-  `omarchy-shell`, `omarchy-notification-send`, `cat` on two fixed paths, and
-  its own two helper scripts in `bin/`. It makes no network requests, needs no
-  elevated privileges, manages no packages or services, and installs nothing.
+  `omarchy-shell`, `omarchy-notification-send`, and its own two `python3` helper
+  scripts in `bin/`. It makes no network requests, needs no elevated privileges,
+  manages no packages or services, and installs nothing.
 - **Theme slugs are validated** in `ThemeDeck.js` (`^[a-z0-9][a-z0-9._-]*$`, no
   `/`, no `..`, length-capped) before they are ever passed to
   `omarchy theme set`, on top of that command's own checks.
-- **The state file is read defensively.** It sits under `~/.local/state`, so
-  `OmaShuffle.qml`'s `stateReaderScript` opens the path exactly once with
-  `O_NOFOLLOW | O_NONBLOCK`, `fstat`s that same descriptor to require a regular
-  file, and reads at most `limit + 1` bytes — the amount read is bounded by the
-  read call itself, not by anything the path claims. Writes go through
-  `FileView` with `atomicWrites`.
-- **`bin/omashuffle-scan-themes`** only reads `colors.toml` files from the two
-  standard theme directories and extracts hex values. It never executes
-  anything a theme ships.
+- **Every file this plugin reads is opened as a bounded, regular, non-symlink
+  file** — `state.json` and `current/theme.name` (both under `~/.local/state`)
+  and the menu file are opened once with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`,
+  `fstat`-checked on that same descriptor to require `S_ISREG`, and read up to a
+  fixed byte cap, so nothing is bounded by what the path claims and a planted
+  FIFO or symlink is refused. `state.json` writes go through `FileView` with
+  `atomicWrites`.
+- **`bin/omashuffle-scan-themes`** enumerates the two standard theme directories
+  and pulls hex values out of each `colors.toml` with the bounded descriptor-safe
+  read above. It caps theme count, slug length, per-file bytes and total output,
+  runs under an outer `timeout`, and never executes anything a theme ships. A
+  theme (which may be an installed third-party repo) cannot make it block or grow
+  the shell.
 - **`bin/omashuffle-menu-entry`** is only ever run when you press *Add menu
-  entry* / *Remove menu entry* in the settings pane. It adds or removes one row
-  in `~/.config/omarchy/extensions/omarchy-menu.jsonc` (backed up next to it as
-  `omarchy-menu.jsonc.omashuffle.bak`, rewritten in place so permissions are
-  kept), only ever touches a row it owns, and bails without writing if the file
-  layout is unfamiliar. The plugin never edits that file on its own.
-- **`python3`** is the only non-Omarchy dependency, used solely for the state
-  reader above.
+  entry* / *Remove menu entry* in the settings pane — the plugin never edits the
+  menu file on its own. It reads `~/.config/omarchy/extensions/omarchy-menu.jsonc`
+  with the bounded descriptor-safe read, builds the edit in a fresh `O_EXCL` temp
+  inode inside that directory (verified to be a real directory you own), then
+  `os.replace`s it over the target without following a symlink there. It only
+  ever touches a row it owns, and bails without writing if the file layout is
+  unfamiliar.
+- **`python3`** is the only dependency beyond Omarchy — the two `bin/` scripts
+  and the in-QML descriptor-safe readers.
 
 ## Not included (by design)
 
@@ -177,15 +183,15 @@ omarchy restart shell
 ```
 
 Your last theme stays applied. If you added the menu row, remove it first from
-the settings pane, or delete the `style.omashuffle` line from
-`~/.config/omarchy/extensions/omarchy-menu.jsonc`. Delete
+the settings pane (*Remove menu entry*), or delete the `style.omashuffle` line
+from `~/.config/omarchy/extensions/omarchy-menu.jsonc` yourself. Delete
 `~/.local/state/omarchy/io.github.omashuffle/` to clear the rotation and history.
 
 ## Development
 
 ```bash
 omarchy plugin validate ~/.config/omarchy/plugins/io.github.omashuffle
-bash -n bin/omashuffle-menu-entry bin/omashuffle-scan-themes
+python3 -m py_compile bin/omashuffle-menu-entry bin/omashuffle-scan-themes
 node --check <(tail -n +2 ThemeDeck.js)   # strip the .pragma line
 omarchy restart shell                     # plugin QML is cached by URL
 ```
