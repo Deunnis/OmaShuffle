@@ -3,11 +3,11 @@
 # omarchy:summary=Open the OmaShuffle theme picker, or manage its menu row
 # omarchy:group=omashuffle
 #
-# Companion to OmaShuffle's Omarchy-menu row. On --install it copies itself
-# into ~/.config/omarchy/extensions/ (so the row keeps working even after the
-# plugin is disabled or removed) and adds a "Style > Theme Shuffle" row. With
-# no arguments it opens the picker, or - if the plugin is gone - takes its own
-# stale row back out. Nothing here runs with elevated privileges.
+# Companion to OmaShuffle's Omarchy-menu row. `--add` copies this script into
+# ~/.config/omarchy/extensions/ (so the row keeps working even after the plugin
+# is disabled or removed) and adds a "Style > Theme Shuffle" row. `--remove`
+# takes it back out. With no arguments it opens the picker, or - if the plugin
+# is gone - removes its own stale row. Runs entirely as the current user.
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ EXT_FILE="${OMARCHY_MENU_EXTENSION:-$EXT_DIR/omarchy-menu.jsonc}"
 SELF_COPY="$EXT_DIR/omashuffle-menu-entry"
 ICON=$(printf '\U000f050e')
 
-usage() { echo "Usage: omashuffle-menu-entry [--install | --remove]"; }
+usage() { echo "Usage: omashuffle-menu-entry [--add | --remove]"; }
 
 plugin_enabled() {
   command -v omarchy-plugin-list >/dev/null 2>&1 || return 1
@@ -34,7 +34,7 @@ row_line() {
     "$ROW_ID" "$ICON" "$SELF_COPY"
 }
 
-install_self_copy() {
+copy_self_to_ext() {
   mkdir -p "$EXT_DIR"
   if [[ ${BASH_SOURCE[0]} -ef $SELF_COPY ]]; then
     return 0
@@ -55,18 +55,19 @@ add_row() {
     return 0
   fi
 
-  cp -f "$EXT_FILE" "$EXT_FILE.omashuffle.bak" 2>/dev/null || true
-
-  # Line number of the final closing brace.
+  # Line number of the final closing brace on its own line.
   local close
   close=$(grep -n '^[[:space:]]*}[[:space:]]*$' "$EXT_FILE" | tail -n1 | cut -d: -f1 || true)
   if [[ -z $close ]]; then
-    # No recognisable closing brace on its own line - append safely instead.
-    printf '\n' >>"$EXT_FILE"
-    row_line >>"$EXT_FILE"
-    printf '\n' >>"$EXT_FILE"
-    return 0
+    # Unfamiliar layout - do not risk corrupting the user's menu. Bail with a
+    # pointer to the manual one-liner (also in the plugin README).
+    echo "omashuffle-menu-entry: could not safely edit $EXT_FILE" >&2
+    echo "Add this line yourself, before the closing brace:" >&2
+    echo "$(row_line)," >&2
+    return 1
   fi
+
+  cp -f "$EXT_FILE" "$EXT_FILE.omashuffle.bak" 2>/dev/null || true
 
   # Walk back from the brace to the previous meaningful line; if it is an
   # entry (not the opening "{" and not already comma-terminated), add a comma.
@@ -139,12 +140,12 @@ remove_row() {
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  --install)
-    install_self_copy
+  --add)
+    copy_self_to_ext
     add_row
     exit 0
     ;;
-  --remove|--uninstall)
+  --remove)
     remove_row
     exit 0
     ;;
@@ -154,7 +155,7 @@ case "${1:-}" in
     fi
     remove_row
     command -v omarchy-notification-send >/dev/null 2>&1 && \
-      omarchy-notification-send "OmaShuffle" "Plugin is disabled — menu entry removed" -t 4000 >/dev/null 2>&1 || true
+      omarchy-notification-send -t 4000 "OmaShuffle" "Plugin is disabled - menu entry removed" >/dev/null 2>&1 || true
     exit 0
     ;;
   *)

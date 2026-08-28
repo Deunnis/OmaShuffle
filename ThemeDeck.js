@@ -45,6 +45,8 @@ function normalizeState(raw) {
     enabled: s.enabled !== false,
     notify: s.notify !== false,
     poolInitialized: s.poolInitialized === true,
+    // "pick some themes" reminders left to show on an empty rotation
+    nagsLeft: clampInt(s.nagsLeft, 0, 3, 3),
     pool: pool,
     deck: sanitizeSlugList(s.deck).filter(function (x) { return pool.indexOf(x) !== -1 }),
     lastAppliedSlug: sanitizeSlug(s.lastAppliedSlug),

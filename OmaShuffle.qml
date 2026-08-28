@@ -35,8 +35,6 @@ Item {
 
   property string pendingAutoSlug: ""
   property string applyingSlug: ""
-  property bool applyingAuto: false
-  property bool noPoolNoticeSent: false
 
   property bool settingsOpen: false
   property string filterText: ""
@@ -132,7 +130,14 @@ Item {
     command: ["cat", root.currentNamePath]
     stdout: StdioCollector { id: currentNameOut; waitForEnd: true }
     onExited: function (code) {
-      root.currentThemeSlug = code === 0 ? Deck.sanitizeSlug(String(currentNameOut.text || "").trim()) : ""
+      var live = code === 0 ? Deck.sanitizeSlug(String(currentNameOut.text || "").trim()) : ""
+      root.currentThemeSlug = live
+      if (root.verifying) {
+        root.verifying = false
+        if (root.applyingSlug && live && live !== root.applyingSlug && root.st.notify)
+          root.notify("OmaShuffle", "Theme may not have applied: " + root.displayFor(root.applyingSlug))
+        root.applyingSlug = ""
+      }
     }
   }
 
@@ -146,33 +151,21 @@ Item {
     }
   }
 
-  Process {
-    id: menuInstallProc
-    stdout: StdioCollector { }
-    stderr: StdioCollector { }
-  }
-  Process {
-    id: themeSetProc
-    // `omarchy theme set` is chatty and also leaves a short-lived backgrounded
-    // child on the stdout pipe; drain both streams so nothing blocks and the
-    // exit signal is delivered.
-    stdout: StdioCollector { }
-    stderr: StdioCollector { }
-    onExited: function (code) { root.onThemeSetDone(code) }
-  }
-  Process {
-    id: notifyProc
-    stdout: StdioCollector { }
-    stderr: StdioCollector { }
-  }
+  // Fire-and-forget spawns. `omarchy theme set` is chatty and leaves a
+  // short-lived backgrounded child on its stdout pipe, so a tracked
+  // running=true/onExited Process is not dependable here - startDetached()
+  // sidesteps exit tracking entirely, which is fine because the deck/history
+  // update is done up front and applied themes are re-verified by re-reading
+  // theme.name a few seconds later (verifyTimer).
+  Process { id: themeSetProc }
+  Process { id: menuEntryProc }
+  Process { id: notifyProc }
 
   Component.onCompleted: {
     stateDirInitProc.running = true
     bootIdProc.running = true
     themeScanProc.running = true
     currentNameProc.running = true
-    menuInstallProc.command = [root.menuEntryBin, "--install"]
-    menuInstallProc.running = true
   }
 
   function loadState(raw) {
@@ -206,11 +199,12 @@ Item {
 
     var draw = Deck.drawNext(root.st, root.st.pool)
     if (!draw.slug) {
-      root.setState(next)
-      if (root.st.notify && !root.st.poolInitialized && !root.noPoolNoticeSent) {
-        root.noPoolNoticeSent = true
-        root.notify("OmaShuffle", "No themes picked yet - open it from the menu (Super + Space)")
+      // Empty rotation. Nudge the user a few times, then stay quiet.
+      if (root.st.notify && !root.st.poolInitialized && next.nagsLeft > 0) {
+        next.nagsLeft = next.nagsLeft - 1
+        root.notify("OmaShuffle", "Pick some themes to shuffle - open OmaShuffle from your Omarchy menu or a keybind")
       }
+      root.setState(next)
       return
     }
 
@@ -231,17 +225,25 @@ Item {
 
   // ============================================================ apply
 
-  // The state update is done up front rather than waiting on the process exit:
-  // `omarchy theme set` is idempotent, rarely fails, and its exit signal is not
-  // dependable (it leaves a brief backgrounded child on the pipe). If it does
-  // exit non-zero, onThemeSetDone() surfaces that.
+  // The deck/history update is done up front rather than waiting on the
+  // process: `omarchy theme set` is idempotent and its exit is not dependable
+  // (see the Process comment above). verifyTimer re-reads theme.name a few
+  // seconds later so the UI self-corrects (and warns) if the switch didn't
+  // actually land.
+  property double lastApplyMs: 0
+
   function applyTheme(slug, auto) {
     var clean = Deck.sanitizeSlug(slug)
     if (!clean) { console.warn("OmaShuffle: refusing invalid theme slug: " + slug); return }
-    if (themeSetProc.running) return
+
+    // Ignore a repeat request for the theme already being applied (double
+    // click, or clicking the current theme) - but never block switching to a
+    // different one.
+    var nowMs = Date.now()
+    if (clean === root.st.lastAppliedSlug && nowMs - root.lastApplyMs < 3000) return
+    root.lastApplyMs = nowMs
 
     root.applyingSlug = clean
-    root.applyingAuto = auto === true
 
     var disp = root.displayFor(clean)
     var newDeck = auto ? null : (root.st.deck || []).filter(function (x) { return x !== clean })
@@ -249,19 +251,19 @@ Item {
     root.currentThemeSlug = clean
 
     themeSetProc.command = ["omarchy", "theme", "set", clean]
-    themeSetProc.running = true
+    themeSetProc.startDetached()
 
     if (root.st.notify) root.notify("OmaShuffle", (auto ? "This boot's theme: " : "Applied: ") + disp)
+    verifyTimer.restart()
   }
 
-  function onThemeSetDone(code) {
-    var slug = root.applyingSlug
-    root.applyingSlug = ""
-    if (code !== 0) {
-      console.warn("OmaShuffle: 'omarchy theme set " + slug + "' exited " + code)
-      if (root.st.notify) root.notify("OmaShuffle", "Theme may not have applied cleanly: " + slug)
-    }
+  Timer {
+    id: verifyTimer
+    interval: 5000
+    repeat: false
+    onTriggered: { root.verifying = true; if (!currentNameProc.running) currentNameProc.running = true }
   }
+  property bool verifying: false
 
   function shuffleNow() {
     var draw = Deck.drawNext(root.st, root.st.pool)
@@ -296,6 +298,7 @@ Item {
   }
 
   function selectAll() {
+    if (root.themes.length === 0) return
     var next = Deck.shallowClone(root.st)
     next.pool = root.themes.map(function (t) { return t.slug })
     next.poolInitialized = true
@@ -383,7 +386,20 @@ Item {
 
   function notify(title, body) {
     notifyProc.command = ["omarchy-notification-send", "-t", "4000", String(title), String(body)]
-    notifyProc.running = true
+    notifyProc.startDetached()
+  }
+
+  // Menu row is opt-in: added / removed only when the user asks, from the
+  // settings pane. The helper script is idempotent either way.
+  function addMenuEntry() {
+    menuEntryProc.command = [root.menuEntryBin, "--add"]
+    menuEntryProc.startDetached()
+    root.notify("OmaShuffle", "Added to the Omarchy menu under Style")
+  }
+  function removeMenuEntry() {
+    menuEntryProc.command = [root.menuEntryBin, "--remove"]
+    menuEntryProc.startDetached()
+    root.notify("OmaShuffle", "Removed from the Omarchy menu")
   }
 
   // ============================================================ IPC surface
@@ -392,9 +408,10 @@ Item {
     root.opened = true
     root.settingsOpen = false
     root.filterText = ""
-    themeScanProc.running = true
-    currentNameProc.running = true
-    Qt.callLater(function () { keyCatcher.forceActiveFocus() })
+    grid.currentIndex = 0
+    if (!themeScanProc.running) themeScanProc.running = true
+    if (!currentNameProc.running) currentNameProc.running = true
+    Qt.callLater(function () { grid.forceActiveFocus() })
   }
   function close() { root.opened = false }
   function toggle() { if (root.opened) root.close(); else root.open("{}") }
@@ -427,6 +444,8 @@ Item {
       id: keyCatcher
       anchors.fill: parent
       focus: true
+      // Intercept Escape before any focused child; let every other key through.
+      Keys.priority: Keys.BeforeItem
       Keys.onPressed: function (event) {
         if (event.key === Qt.Key_Escape) {
           if (root.settingsOpen) root.settingsOpen = false
@@ -447,6 +466,7 @@ Item {
         MouseArea { anchors.fill: parent }   // stop clicks reaching the scrim
 
         readonly property int pad: Style.spacing.panelPadding
+        readonly property int headerRowH: Style.font.heading + Style.spacing.xs
 
         // -------------------------------------------------- header
         Column {
@@ -457,7 +477,7 @@ Item {
 
           Item {
             width: parent.width
-            height: card.settingsHeaderRowH
+            height: card.headerRowH
 
             Text {
               anchors.left: parent.left
@@ -509,8 +529,6 @@ Item {
             }
           }
         }
-
-        readonly property int settingsHeaderRowH: Style.font.heading + Style.spacing.xs
 
         // -------------------------------------------------- body
         Item {
@@ -587,15 +605,30 @@ Item {
                 }
               }
 
-              PanelSectionHeader { text: "MENU ENTRY" }
+              PanelSectionHeader { text: "OMARCHY MENU" }
               Text {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 color: Qt.darker(root.foreground, 1.3)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
-                text: "Open this picker from the Omarchy menu (Super + Space), under Style -> Theme Shuffle. " +
-                      "The row is added automatically and removes itself if you disable the plugin."
+                text: "Add a row to the Omarchy menu (Super + Space) under Style, so you can open this " +
+                      "picker without a keybind. It edits ~/.config/omarchy/extensions/omarchy-menu.jsonc " +
+                      "(backed up first) and only ever touches its own row."
+              }
+              Row {
+                width: parent.width
+                spacing: Style.spacing.sm
+                Button {
+                  text: "Add menu entry"
+                  foreground: root.foreground; accent: root.accent; bordered: true
+                  onClicked: root.addMenuEntry()
+                }
+                Button {
+                  text: "Remove menu entry"
+                  foreground: root.foreground; accent: root.accent; bordered: true
+                  onClicked: root.removeMenuEntry()
+                }
               }
             }
           }
@@ -649,9 +682,9 @@ Item {
               font.pixelSize: Style.font.caption
               text: {
                 var n = (root.st.pool || []).length
-                return n + " of " + root.themes.length + " themes in rotation    -    " +
+                return n + " of " + root.themes.length + " in rotation    -    " +
                        (root.st.deck || []).length + " left in this shuffle    -    " +
-                       "left-click applies now, right-click adds/removes from rotation"
+                       "click / Enter applies, right-click / Space adds to rotation"
               }
             }
 
@@ -667,6 +700,28 @@ Item {
               boundsBehavior: Flickable.StopAtBounds
               model: root.filteredThemes()
 
+              keyNavigationEnabled: true
+              keyNavigationWraps: false
+              highlightMoveDuration: 90
+              Component.onCompleted: currentIndex = 0
+
+              // Arrow keys move the highlight (GridView handles that natively);
+              // Enter applies the highlighted theme, Space adds/removes it from
+              // the rotation, Escape closes.
+              Keys.onReturnPressed: if (currentItem) root.applyTheme(currentItem.modelData.slug, false)
+              Keys.onEnterPressed: if (currentItem) root.applyTheme(currentItem.modelData.slug, false)
+              Keys.onSpacePressed: if (currentItem) root.togglePool(currentItem.modelData.slug)
+              Keys.onEscapePressed: root.close()
+
+              highlight: Rectangle {
+                color: "transparent"
+                border.color: root.accent
+                border.width: Math.max(2, Style.space(2))
+                radius: Math.max(2, Style.cornerRadius)
+                visible: grid.activeFocus
+                z: 2
+              }
+
               readonly property int cols: Math.max(1, Math.floor(width / Style.space(220)))
               cellWidth: Math.floor(width / cols)
               cellHeight: Style.space(104)
@@ -676,6 +731,7 @@ Item {
                 width: grid.cellWidth
                 height: grid.cellHeight
                 required property var modelData
+                required property int index
                 readonly property bool picked: root.inPool(modelData.slug)
                 readonly property bool isCurrent: modelData.slug === root.currentThemeSlug
 
@@ -695,12 +751,14 @@ Item {
                     spacing: Style.spacing.xs
 
                     Row {
+                      id: paletteStrip
                       width: parent.width
                       height: Style.space(16)
+                      clip: true
                       Repeater {
                         model: cell.modelData.strip
                         Rectangle {
-                          width: cell.width > 0 ? (parent.width / cell.modelData.strip.length) : 1
+                          width: Math.ceil(paletteStrip.width / Math.max(1, cell.modelData.strip.length))
                           height: parent.height
                           color: modelData
                         }
@@ -748,6 +806,7 @@ Item {
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                     cursorShape: Qt.PointingHandCursor
                     onClicked: function (mouse) {
+                      grid.currentIndex = cell.index
                       if (mouse.button === Qt.RightButton) root.togglePool(cell.modelData.slug)
                       else root.applyTheme(cell.modelData.slug, false)
                     }
@@ -760,13 +819,15 @@ Item {
               id: historyStrip
               anchors.bottom: parent.bottom
               width: parent.width
+              height: Style.font.caption + Style.spacing.xs   // fixed, so the grid anchor can't loop
+              verticalAlignment: Text.AlignBottom
               elide: Text.ElideRight
               color: Qt.darker(root.foreground, 1.4)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               text: {
                 var h = root.st.history || []
-                if (h.length === 0) return ""
+                if (h.length === 0) return "your recent themes show up here"
                 var now = Date.now() / 1000
                 var parts = []
                 for (var i = 0; i < Math.min(h.length, 6); i++) {

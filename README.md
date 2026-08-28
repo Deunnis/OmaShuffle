@@ -37,8 +37,8 @@ whole setup.
 
 After that, **every real boot** OmaShuffle quietly applies the next theme in the
 deck. The deck is a shuffled bag: every theme you picked comes up exactly once,
-then the bag reshuffles and the theme you're currently wearing gets pushed to
-the back so you don't see it twice in a row.
+then the bag reshuffles and the theme you're currently wearing is pushed to the
+back so you don't see it twice in a row.
 
 "Real boot" means a genuine power-on or reboot — the kind where you had to type
 your disk-unlock passphrase. It reads `/proc/sys/kernel/random/boot_id`, a value
@@ -55,6 +55,15 @@ Nothing here is a one-way door. It's a normal `omarchy theme set` under the
 hood — grab any theme by hand from the picker (or the usual `omarchy theme`
 command) whenever the deck deals you something you're not in the mood for.
 
+## Requirements
+
+- **Omarchy 4** with its Quickshell-based shell
+- **`python3`** — the only dependency beyond Omarchy itself. Used once at startup
+  to read this plugin's own small state file safely (see *Notes for reviewers*).
+  It's present on a normal Omarchy install.
+
+No network access. No elevated privileges. No package management.
+
 ## Install
 
 ```bash
@@ -62,33 +71,47 @@ omarchy plugin add https://github.com/Deunnis/OmaShuffle.git --enable
 omarchy restart shell
 ```
 
-Then open the picker from the Omarchy menu — **Super + Space → Style → Theme
-Shuffle**. The menu row installs itself the first time the plugin loads, and
-takes itself back out if you ever disable the plugin.
+That's it — it starts working from the next boot. Until you pick at least one
+theme it does nothing but show a one-line reminder on boot.
 
-Prefer a keybinding? Add one to `~/.config/hypr/bindings.lua`:
+## Opening the picker
+
+Three ways, pick whichever you like:
+
+**1. A keybind** (fastest). Add one to `~/.config/hypr/bindings.lua`, on any
+combo that's free for you:
 
 ```lua
-o.bind("SUPER SHIFT", "T", "omarchy-shell shell toggle io.github.omashuffle")
+o.bind("SUPER + SHIFT + S", "Theme shuffle", "omarchy-shell shell toggle io.github.omashuffle")
 ```
 
-Until you've picked at least one theme, nothing switches — you just get a
-one-time nudge on boot pointing you at the menu.
+**2. The Omarchy menu** (Super + Space). Open the picker once via the keybind or
+`omarchy-shell shell toggle io.github.omashuffle`, go to the gear → **Omarchy
+menu → Add menu entry**. That adds a **Style → Theme Shuffle** row. You can
+remove it again from the same place. If you'd rather add it by hand, drop this
+into `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
+
+```jsonc
+"style.omashuffle": {"icon":"󰔎","label":"Theme Shuffle","aliases":["shuffle"],"action":"omarchy-shell shell toggle io.github.omashuffle"},
+```
+
+**3. IPC**, for scripts: `omarchy-shell shell toggle io.github.omashuffle`
 
 ## Using the picker
 
-<img src="screenshots/settings.png" alt="The OmaShuffle settings pane: boot-shuffle and notification toggles, plus transparency, corner and outline sliders" width="640">
+<img src="screenshots/settings.png" alt="The OmaShuffle settings pane: boot-shuffle and notification toggles, transparency / corner / outline sliders, and Add / Remove menu entry buttons" width="640">
 
 | Action | What it does |
 |---|---|
-| **Left-click a theme** | apply it right now |
-| **Right-click a theme** | add / remove it from the rotation (the checkmark) |
+| **Click** a theme (or **Enter**) | apply it right now |
+| **Right-click** a theme (or **Space**) | add / remove it from the rotation |
+| Arrow keys | move the highlight |
 | **Shuffle now** | jump straight to the next deck theme |
 | **Reshuffle deck** | throw out the current order and draw a fresh shuffle |
 | **Select all / none** | bulk-edit the rotation |
 | **Boot shuffle: on / off** | the master switch for the once-per-boot behaviour |
 | **Filter themes…** | narrow the grid by name |
-| gear icon | notification on/off, plus transparency / corner / outline sliders for the card |
+| gear icon | notifications, card transparency / corners / outline, menu entry |
 | `Esc` | close (or leave settings) |
 
 The header always tells you what you're wearing now and what's queued for next
@@ -113,8 +136,8 @@ Delete the file to start over; disable the plugin to stop entirely.
 
 - **No network. No privileged calls.** The plugin runs `omarchy theme set`,
   `omarchy-shell`, `omarchy-notification-send`, `cat` on two fixed paths, and
-  its own two helper scripts in `bin/`. There is no `curl`, no package
-  management, no elevation of any kind.
+  its own two helper scripts in `bin/`. It makes no network requests, needs no
+  elevated privileges, manages no packages or services, and installs nothing.
 - **Theme slugs are validated** in `ThemeDeck.js` (`^[a-z0-9][a-z0-9._-]*$`, no
   `/`, no `..`, length-capped) before they are ever passed to
   `omarchy theme set`, on top of that command's own checks.
@@ -123,16 +146,16 @@ Delete the file to start over; disable the plugin to stop entirely.
   `O_NOFOLLOW | O_NONBLOCK`, `fstat`s that same descriptor to require a regular
   file, and reads at most `limit + 1` bytes — the amount read is bounded by the
   read call itself, not by anything the path claims. Writes go through
-  `FileView` with `atomicWrites`. (Same approach the marketplace review settled
-  on for `io.github.comapilot`.)
+  `FileView` with `atomicWrites`.
 - **`bin/omashuffle-scan-themes`** only reads `colors.toml` files from the two
   standard theme directories and extracts hex values. It never executes
   anything a theme ships.
-- **`bin/omashuffle-menu-entry`** adds or removes a single row in
-  `~/.config/omarchy/extensions/omarchy-menu.jsonc` (backed up next to it as
-  `omarchy-menu.jsonc.omashuffle.bak` before each edit, and rewritten in place
-  so the file keeps its permissions). It only ever reclaims a row it owns —
-  same pattern as the `taxin.cursor-style` plugin.
+- **`bin/omashuffle-menu-entry`** is only ever run when you press *Add menu
+  entry* / *Remove menu entry* in the settings pane. It adds or removes one row
+  in `~/.config/omarchy/extensions/omarchy-menu.jsonc` (backed up next to it as
+  `omarchy-menu.jsonc.omashuffle.bak`, rewritten in place so permissions are
+  kept), only ever touches a row it owns, and bails without writing if the file
+  layout is unfamiliar. The plugin never edits that file on its own.
 - **`python3`** is the only non-Omarchy dependency, used solely for the state
   reader above.
 
@@ -153,21 +176,22 @@ omarchy plugin remove io.github.omashuffle
 omarchy restart shell
 ```
 
-Your last theme stays applied. The menu row removes itself. Delete
-`~/.local/state/omarchy/io.github.omashuffle/` if you want the rotation and
-history gone too.
+Your last theme stays applied. If you added the menu row, remove it first from
+the settings pane, or delete the `style.omashuffle` line from
+`~/.config/omarchy/extensions/omarchy-menu.jsonc`. Delete
+`~/.local/state/omarchy/io.github.omashuffle/` to clear the rotation and history.
 
 ## Development
 
 ```bash
 omarchy plugin validate ~/.config/omarchy/plugins/io.github.omashuffle
 bash -n bin/omashuffle-menu-entry bin/omashuffle-scan-themes
-omarchy restart shell   # plugin QML is cached by URL; edits need a restart
+node --check <(tail -n +2 ThemeDeck.js)   # strip the .pragma line
+omarchy restart shell                     # plugin QML is cached by URL
 ```
 
-Deck logic (`ThemeDeck.js`) is pure and has no QML or I/O dependencies, so it's
-the easy place to reason about shuffling, the no-immediate-repeat rule, and slug
-validation.
+`ThemeDeck.js` is pure logic with no QML or I/O dependencies — the easy place to
+reason about shuffling, the no-immediate-repeat rule, and slug validation.
 
 ## License
 
