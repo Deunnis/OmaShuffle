@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=OmaShuffle
+GenericName=Theme Shuffle
+Comment=Rotate Omarchy themes on every boot; open the picker to choose the deck
+Exec=omarchy-shell shell toggle io.github.omashuffle
+TryExec=omarchy-shell
+Icon=@ICON@
+Terminal=false
+StartupNotify=false
+Categories=Settings;DesktopSettings;
+Keywords=omarchy;theme;shuffle;random;rotate;deck;
+X-OmaShuffle-Managed=true

@@ -6,9 +6,10 @@
   "author": "Deunnis",
   "license": "MIT",
   "description": "Applies a different theme on every real boot, drawn from a shuffled deck of themes you curate. Fullscreen picker opened from the Omarchy menu; every switch stays fully reversible.",
-  "kinds": ["overlay"],
+  "kinds": ["overlay", "service"],
   "keepLoaded": true,
   "entryPoints": {
-    "overlay": "OmaShuffle.qml"
+    "overlay": "OmaShuffle.qml",
+    "service": "Service.qml"
   }
 }

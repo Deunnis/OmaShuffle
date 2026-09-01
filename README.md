@@ -76,26 +76,31 @@ theme it does nothing but show a one-line reminder on boot.
 
 ## Opening the picker
 
-Three ways, pick whichever you like:
+**Out of the box: Super + Space.** Enabling OmaShuffle installs a launcher
+entry (`~/.local/share/applications/omashuffle.desktop`), so the picker shows up
+in the Omarchy menu and app launcher straight away — search *OmaShuffle* or
+*theme shuffle*. Disabling or removing the plugin deletes that entry again;
+only a file carrying the `X-OmaShuffle-Managed=true` marker is ever touched.
 
-**1. A keybind** (fastest). Add one to `~/.config/hypr/bindings.lua`, on any
-combo that's free for you:
+Other ways, if you want them:
+
+**A keybind** (fastest). Add one to `~/.config/hypr/bindings.lua`, on any combo
+that's free for you:
 
 ```lua
 o.bind("SUPER + SHIFT + S", "Theme shuffle", "omarchy-shell shell toggle io.github.omashuffle")
 ```
 
-**2. The Omarchy menu** (Super + Space). Open the picker once via the keybind or
-`omarchy-shell shell toggle io.github.omashuffle`, go to the gear → **Omarchy
-menu → Add menu entry**. That adds a **Style → Theme Shuffle** row. You can
-remove it again from the same place. If you'd rather add it by hand, drop this
-into `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
+**A dedicated menu row.** The launcher entry lands under *Apps*; if you'd
+rather have a row somewhere specific, the gear → **Omarchy menu → Add menu
+entry** adds a **Style → Theme Shuffle** row (remove it from the same place).
+By hand, drop this into `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 
 ```jsonc
 "style.omashuffle": {"icon":"󰔎","label":"Theme Shuffle","aliases":["shuffle"],"action":"omarchy-shell shell toggle io.github.omashuffle"},
 ```
 
-**3. IPC**, for scripts: `omarchy-shell shell toggle io.github.omashuffle`
+**IPC**, for scripts: `omarchy-shell shell toggle io.github.omashuffle`
 
 ## Using the picker
 
@@ -137,7 +142,15 @@ Delete the file to start over; disable the plugin to stop entirely.
 - **No network. No privileged calls.** The plugin runs `omarchy theme set`,
   `omarchy-shell`, `omarchy-notification-send`, and its own two `python3` helper
   scripts in `bin/`. It makes no network requests, needs no elevated privileges,
-  manages no packages or services, and installs nothing.
+  and manages no packages or services.
+- **`Service.qml`** writes one file: `~/.local/share/applications/omashuffle.desktop`,
+  a launcher entry pointing at `omarchy-shell shell toggle io.github.omashuffle`.
+  It copies the bundled `omashuffle.desktop` template (substituting the icon
+  path) only when the destination is absent or already carries the
+  `X-OmaShuffle-Managed=true` marker, writing through a temp file in the same
+  directory and swapping it in only on a real content change. On disable/remove
+  it deletes that file, again only if the marker is present. This mirrors how
+  Omaland registers its launcher entry.
 - **Theme slugs are validated** in `ThemeDeck.js` (`^[a-z0-9][a-z0-9._-]*$`, no
   `/`, no `..`, length-capped) before they are ever passed to
   `omarchy theme set`, on top of that command's own checks.
@@ -182,9 +195,11 @@ omarchy plugin remove io.github.omashuffle
 omarchy restart shell
 ```
 
-Your last theme stays applied. If you added the menu row, remove it first from
-the settings pane (*Remove menu entry*), or delete the `style.omashuffle` line
-from `~/.config/omarchy/extensions/omarchy-menu.jsonc` yourself. Delete
+Your last theme stays applied. The launcher entry
+(`~/.local/share/applications/omashuffle.desktop`) is removed automatically on
+disable/remove. If you also added the dedicated menu row, remove it from the
+settings pane (*Remove menu entry*) or delete the `style.omashuffle` line from
+`~/.config/omarchy/extensions/omarchy-menu.jsonc` yourself. Delete
 `~/.local/state/omarchy/io.github.omashuffle/` to clear the rotation and history.
 
 ## Development
