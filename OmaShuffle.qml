@@ -496,16 +496,18 @@ Item {
   function setScheduleEnabled(v) { root.updateSchedule({ enabled: v === true }); root.checkSchedule() }
   function setLocationMode(mode) { root.updateSchedule({ locationMode: mode === "manual" ? "manual" : "auto" }); root.checkSchedule() }
 
+  // Entering either coordinate switches to manual mode - typing a number in
+  // is a clear signal you want it used over whatever was (or wasn't) detected.
   function setManualLatitude(text) {
     var v = parseFloat(text)
     if (!isFinite(v)) return
-    root.updateSchedule({ latitude: Math.max(-90, Math.min(90, v)) })
+    root.updateSchedule({ latitude: Math.max(-90, Math.min(90, v)), locationMode: "manual" })
     root.checkSchedule()
   }
   function setManualLongitude(text) {
     var v = parseFloat(text)
     if (!isFinite(v)) return
-    root.updateSchedule({ longitude: Math.max(-180, Math.min(180, v)) })
+    root.updateSchedule({ longitude: Math.max(-180, Math.min(180, v)), locationMode: "manual" })
     root.checkSchedule()
   }
 
@@ -845,13 +847,15 @@ Item {
               if (root.st.schedule.enabled) {
                 var loc = root.effectiveLocation()
                 var sched = Sun.computeSchedule(root.st.schedule.slots, loc.lat, loc.lon, new Date())
-                var activeLabel = sched.activeSlot ? sched.activeSlot.label : "-"
-                var nextBit = "-"
-                if (sched.nextSlot && sched.nextBoundaryTs) {
-                  var d = new Date(sched.nextBoundaryTs)
-                  nextBit = sched.nextSlot.label + " at " + root.pad2(d.getHours()) + ":" + root.pad2(d.getMinutes())
+                if (sched.activeSlot) {
+                  var nextBit = "-"
+                  if (sched.nextSlot && sched.nextBoundaryTs) {
+                    var d = new Date(sched.nextBoundaryTs)
+                    nextBit = sched.nextSlot.label + " at " + root.pad2(d.getHours()) + ":" + root.pad2(d.getMinutes())
+                  }
+                  return "Now: " + cur + " (" + sched.activeSlot.label + ")        Next: " + nextBit
                 }
-                return "Now: " + cur + " (" + activeLabel + ")        Next: " + nextBit
+                return "Now: " + cur + "        Day & Night: needs a location — see the Schedule tab"
               }
               var nxt = root.nextSlug ? root.displayFor(root.nextSlug)
                         : ((root.st.pool || []).length > 0 ? "a random pick from your rotation" : "nothing picked yet")
@@ -1017,15 +1021,28 @@ Item {
                 color: Qt.darker(root.foreground, 1.3)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
-                text: root.detectedLocationLabel || isFinite(root.detectedLat)
-                      ? "Detected from your Omarchy weather location: " +
-                        (root.detectedLocationLabel || (root.detectedLat.toFixed(2) + ", " + root.detectedLon.toFixed(2)))
-                      : "No weather location set - set one with omarchy-weather-location, or enter coordinates manually below."
+                text: {
+                  var hasDetected = isFinite(root.detectedLat) && isFinite(root.detectedLon)
+                  if (root.st.schedule.locationMode === "auto" && hasDetected) {
+                    return "Using your saved Omarchy weather location: " +
+                           (root.detectedLocationLabel ? root.detectedLocationLabel + "  (" : "") +
+                           root.detectedLat.toFixed(2) + ", " + root.detectedLon.toFixed(2) +
+                           (root.detectedLocationLabel ? ")" : "")
+                  }
+                  if (root.detectedLocationLabel) {
+                    return "Omarchy knows your city (" + root.detectedLocationLabel + ") but has no saved " +
+                           "coordinates for it. Day & Night needs exact coordinates and makes no network call - " +
+                           "enter them below, or run  omarchy-weather-location --set \"" + root.detectedLocationLabel + "\" <lat>,<lon>"
+                  }
+                  return "No saved coordinates. A city auto-detected from your IP isn't stored and can't be used here. " +
+                         "Enter your latitude/longitude below, or run  omarchy-weather-location --set \"City\" <lat>,<lon>  and restart the shell."
+                }
               }
 
               Row {
                 width: parent.width
                 spacing: Style.spacing.sm
+                visible: isFinite(root.detectedLat) && isFinite(root.detectedLon)
                 Button {
                   text: "Auto (detected)"
                   foreground: root.foreground; accent: root.accent; bordered: true
@@ -1043,7 +1060,10 @@ Item {
               Row {
                 width: parent.width
                 spacing: Style.spacing.md
+                // Always available when there's no usable auto location, so
+                // there is a way in even while locationMode is still "auto".
                 visible: root.st.schedule.locationMode === "manual"
+                         || !(isFinite(root.detectedLat) && isFinite(root.detectedLon))
 
                 TextField {
                   id: latField
