@@ -3,10 +3,13 @@
 // Pure deck logic for OmaShuffle. No QML, no I/O - just state in, state out,
 // so it can be reasoned about and tested on its own.
 
-var STATE_VERSION = 1
+var STATE_VERSION = 2
 var MAX_HISTORY = 40
 var MAX_POOL = 500      // far above any real installed-theme count; a sanity cap
 var SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/
+var MAX_SLOTS = 6        // Day & Night slots; plenty for morning/day/evening/night + a couple more
+var MIN_OFFSET_MIN = -180
+var MAX_OFFSET_MIN = 180
 
 // omarchy-theme-set's own rules: lowercase, no leading dot, no slash.
 function sanitizeSlug(s) {
@@ -55,7 +58,8 @@ function normalizeState(raw) {
     // card chrome, mirrored from OmaDeezer's ranges/defaults
     transparency: clampInt(s.transparency, 0, 100, 0),
     cornerRadius: clampInt(s.cornerRadius, 0, 20, 8),
-    borderWidth: clampInt(s.borderWidth, 0, 6, 2)
+    borderWidth: clampInt(s.borderWidth, 0, 6, 2),
+    schedule: normalizeSchedule(s.schedule)
   }
   if (Array.isArray(s.history)) {
     for (var i = 0; i < s.history.length && st.history.length < MAX_HISTORY; i++) {
@@ -78,6 +82,71 @@ function clampInt(v, lo, hi, dflt) {
   var n = Math.round(Number(v))
   if (!isFinite(n)) return dflt
   return Math.max(lo, Math.min(hi, n))
+}
+
+// -------------------------------------------------------- Day & Night
+
+function clampFloatOrNull(v, lo, hi) {
+  var n = Number(v)
+  if (!isFinite(n)) return null
+  return Math.max(lo, Math.min(hi, n))
+}
+
+function defaultSlots() {
+  return [
+    { id: "day", label: "Day", mode: "light", anchor: "sunrise", offsetMin: 0, deck: [], lastAppliedSlug: "" },
+    { id: "night", label: "Night", mode: "dark", anchor: "sunset", offsetMin: 0, deck: [], lastAppliedSlug: "" }
+  ]
+}
+
+function normalizeSlot(raw, fallbackId) {
+  var s = (raw && typeof raw === "object") ? raw : {}
+  var id = sanitizeSlug(typeof s.id === "string" ? s.id.toLowerCase() : "") || fallbackId
+  return {
+    id: id,
+    label: (typeof s.label === "string" && s.label.trim()) ? s.label.slice(0, 40) : id,
+    mode: (s.mode === "dark") ? "dark" : "light",
+    anchor: (s.anchor === "sunset") ? "sunset" : "sunrise",
+    offsetMin: clampInt(s.offsetMin, MIN_OFFSET_MIN, MAX_OFFSET_MIN, 0),
+    deck: sanitizeSlugList(s.deck),
+    lastAppliedSlug: sanitizeSlug(s.lastAppliedSlug)
+  }
+}
+
+function normalizeSlots(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) return defaultSlots()
+  var out = []
+  var seenIds = {}
+  for (var i = 0; i < raw.length && out.length < MAX_SLOTS; i++) {
+    var slot = normalizeSlot(raw[i], "slot" + (i + 1))
+    while (seenIds[slot.id]) slot.id = slot.id + "-" + (out.length + 1)
+    seenIds[slot.id] = true
+    out.push(slot)
+  }
+  return out.length > 0 ? out : defaultSlots()
+}
+
+// Day & Night: an independent, opt-in (default off) schedule that applies a
+// theme by time of day instead of once per boot. See SunTimes.js for the
+// sun-position math this drives on.
+function normalizeSchedule(raw) {
+  var s = (raw && typeof raw === "object") ? raw : {}
+  var override = (s.override && typeof s.override === "object") ? s.override : {}
+  var untilTs = Number(override.untilTs)
+  return {
+    enabled: s.enabled === true,
+    locationMode: (s.locationMode === "manual") ? "manual" : "auto",
+    latitude: clampFloatOrNull(s.latitude, -90, 90),
+    longitude: clampFloatOrNull(s.longitude, -180, 180),
+    locationLabel: (typeof s.locationLabel === "string") ? s.locationLabel.slice(0, 120) : "",
+    slots: normalizeSlots(s.slots),
+    lastAppliedSlotId: sanitizeSlug(typeof s.lastAppliedSlotId === "string" ? s.lastAppliedSlotId.toLowerCase() : ""),
+    override: {
+      slug: sanitizeSlug(override.slug),
+      untilTs: (isFinite(untilTs) && untilTs > 0) ? Math.floor(untilTs) : 0
+    },
+    notifiedEmptyModeFor: sanitizeSlug(typeof s.notifiedEmptyModeFor === "string" ? s.notifiedEmptyModeFor.toLowerCase() : "")
+  }
 }
 
 // Pick the next theme to apply. Returns { slug, deck } where deck is the

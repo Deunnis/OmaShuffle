@@ -5,6 +5,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "ThemeDeck.js" as Deck
+import "SunTimes.js" as Sun
 
 // OmaShuffle - applies a fresh theme on every real boot, drawn from a
 // shuffled deck of themes the user curates, plus a fullscreen picker to
@@ -22,6 +23,10 @@ Item {
   readonly property string scanBin: root.pluginDir + "/bin/omashuffle-scan-themes"
   readonly property string menuEntryBin: root.pluginDir + "/bin/omashuffle-menu-entry"
   readonly property string currentNamePath: root.home + "/.local/state/omarchy/current/theme.name"
+  // Omarchy's own weather-location file - reused (read-only) as the default
+  // Day & Night location source so most people never have to type
+  // coordinates by hand. Written by omarchy-weather-location; may not exist.
+  readonly property string weatherLocationPath: root.home + "/.local/state/omarchy/settings/weather.json"
 
   // ---------------------------------------------------------------- state
   property var st: Deck.normalizeState(null)
@@ -36,8 +41,19 @@ Item {
   property string pendingAutoSlug: ""
   property string applyingSlug: ""
 
-  property bool settingsOpen: false
+  // Which of the card's three views is showing. Kept as one string (rather
+  // than two independent bools) so the views stay mutually exclusive by
+  // construction.
+  property string panel: "picker"   // "picker" | "settings" | "schedule"
   property string filterText: ""
+
+  // Location auto-detected from Omarchy's weather settings at startup - not
+  // persisted (re-read fresh every session); used whenever
+  // schedule.locationMode is "auto". NaN means "nothing detected yet / no
+  // usable coordinates there".
+  property real detectedLat: NaN
+  property real detectedLon: NaN
+  property string detectedLocationLabel: ""
 
   // live mirrors, updated continuously while a chrome slider is dragged
   property int liveTransparency: st.transparency
@@ -143,6 +159,35 @@ Item {
     }
   }
 
+  // Read-only, best-effort: Omarchy's weather-location file, reused as the
+  // default Day & Night location source. Same bounded, descriptor-pinned
+  // reader as state.json / theme.name - missing file (very likely; it's
+  // optional and only written when the user sets a weather location) or an
+  // unreadable/oversized one just means "nothing detected", handled the
+  // same as any other exit code here.
+  Process {
+    id: weatherLocationProc
+    command: ["python3", "-c", root.stateReaderScript, root.weatherLocationPath, "4096"]
+    stdout: StdioCollector { id: weatherLocationOut; waitForEnd: true }
+    onExited: function (code) {
+      if (code !== 0) return
+      var parsed = null
+      try { parsed = JSON.parse(weatherLocationOut.text) } catch (e) { parsed = null }
+      if (!parsed || typeof parsed !== "object") return
+      var lat = Number(parsed.latitude), lon = Number(parsed.longitude)
+      if (isFinite(lat) && lat >= -90 && lat <= 90 && isFinite(lon) && lon >= -180 && lon <= 180) {
+        root.detectedLat = lat
+        root.detectedLon = lon
+      }
+      if (typeof parsed.name === "string") root.detectedLocationLabel = parsed.name.slice(0, 120)
+      // This can resolve after the initial checkSchedule() call at startup
+      // (independent process, no ordering guarantee) - re-check so an
+      // auto-location schedule doesn't sit on the wrong slot until the next
+      // 60s tick.
+      root.checkSchedule()
+    }
+  }
+
   Process {
     id: themeScanProc
     // Outer hard deadline; the scanner also self-bounds output and read sizes.
@@ -169,6 +214,20 @@ Item {
     bootIdProc.running = true
     themeScanProc.running = true
     currentNameProc.running = true
+    weatherLocationProc.running = true
+  }
+
+  // Live boundary-crossing check for Day & Night. A 60s cadence is simple,
+  // needs no suspend/resume hooks, and comfortably covers "switch within a
+  // minute of the boundary" and "catch up after the machine was asleep"
+  // (the next tick after resume just sees whatever slot is current).
+  Timer {
+    id: scheduleTimer
+    interval: 60000
+    repeat: true
+    running: root.stateLoaded && root.st.schedule.enabled
+    triggeredOnStart: false
+    onTriggered: root.checkSchedule()
   }
 
   function loadState(raw) {
@@ -180,6 +239,7 @@ Item {
     root.liveBorderWidth = root.st.borderWidth
     root.stateLoaded = true
     root.maybeBootSwitch()
+    root.checkSchedule()
   }
 
   function persist() { stateFile.setText(JSON.stringify(root.st, null, 2) + "\n") }
@@ -198,7 +258,10 @@ Item {
     var next = Deck.shallowClone(root.st)
     next.lastBootId = root.currentBootId
 
-    if (!root.st.enabled) { root.setState(next); return }
+    // Boot-shuffle's own top-level draw is dormant while Day & Night is on -
+    // checkSchedule() decides the applied theme in that case, and its own
+    // per-slot decks are where the "shuffle" comes from instead.
+    if (!root.st.enabled || root.st.schedule.enabled) { root.setState(next); return }
 
     var draw = Deck.drawNext(root.st, root.st.pool)
     if (!draw.slug) {
@@ -235,7 +298,10 @@ Item {
   // actually land.
   property double lastApplyMs: 0
 
-  function applyTheme(slug, auto) {
+  // `quiet` suppresses the switch notification even when the notify setting
+  // is on - used for Day & Night's own "instant + quiet" auto-switches; the
+  // theme-may-not-have-applied safety warning (verifyTimer) is unaffected.
+  function applyTheme(slug, auto, quiet) {
     var clean = Deck.sanitizeSlug(slug)
     if (!clean) { console.warn("OmaShuffle: refusing invalid theme slug: " + slug); return }
 
@@ -250,13 +316,27 @@ Item {
 
     var disp = root.displayFor(clean)
     var newDeck = auto ? null : (root.st.deck || []).filter(function (x) { return x !== clean })
-    root.setState(Deck.recordApplied(root.st, clean, disp, Date.now() / 1000, auto === true, newDeck))
+    var next = Deck.recordApplied(root.st, clean, disp, Date.now() / 1000, auto === true, newDeck)
+
+    // A manual pick (from the grid, not an auto/scheduled apply) while Day &
+    // Night is driving selection pauses its auto-switching until the next
+    // boundary, rather than having the next tick immediately redraw over
+    // the user's choice. Persisted, so the pause survives a shell restart.
+    if (!auto && next.schedule.enabled) {
+      var loc = root.effectiveLocation()
+      var sched = Sun.computeSchedule(next.schedule.slots, loc.lat, loc.lon, new Date())
+      next = Deck.shallowClone(next)
+      next.schedule = Deck.shallowClone(next.schedule)
+      next.schedule.override = { slug: clean, untilTs: sched.nextBoundaryTs || 0 }
+    }
+
+    root.setState(next)
     root.currentThemeSlug = clean
 
     themeSetProc.command = ["omarchy", "theme", "set", clean]
     themeSetProc.startDetached()
 
-    if (root.st.notify) root.notify("OmaShuffle", (auto ? "This boot's theme: " : "Applied: ") + disp)
+    if (root.st.notify && !quiet) root.notify("OmaShuffle", (auto ? "This boot's theme: " : "Applied: ") + disp)
     verifyTimer.restart()
   }
 
@@ -268,7 +348,15 @@ Item {
   }
   property bool verifying: false
 
+  // Both act on the currently-active Day & Night slot's deck instead of the
+  // global boot-shuffle deck when the schedule is on.
   function shuffleNow() {
+    if (root.st.schedule.enabled) {
+      var active = root.activeSlot()
+      if (!active) { root.notify("OmaShuffle", "No active Day & Night slot yet"); return }
+      root.applyForSlot(active.id, true, false)
+      return
+    }
     var draw = Deck.drawNext(root.st, root.st.pool)
     if (!draw.slug) { root.notify("OmaShuffle", "Pick at least one theme first"); return }
     var next = Deck.shallowClone(root.st)
@@ -278,6 +366,12 @@ Item {
   }
 
   function reshuffleDeck() {
+    if (root.st.schedule.enabled) {
+      var active = root.activeSlot()
+      if (!active) return
+      root.updateSlot(active.id, { deck: [] })
+      return
+    }
     var next = Deck.shallowClone(root.st)
     next.deck = []
     root.setState(next)
@@ -355,6 +449,164 @@ Item {
     else root.liveBorderWidth = Math.round(v)
   }
 
+  // ============================================================ day & night
+
+  // Manual-mode coordinates take priority; otherwise whatever was detected
+  // from Omarchy's weather location at startup (NaN if nothing was found -
+  // SunTimes.js treats non-finite lat/lon as "no schedule").
+  function effectiveLocation() {
+    var sch = root.st.schedule
+    if (sch.locationMode === "manual") {
+      return {
+        lat: (typeof sch.latitude === "number") ? sch.latitude : NaN,
+        lon: (typeof sch.longitude === "number") ? sch.longitude : NaN
+      }
+    }
+    return { lat: root.detectedLat, lon: root.detectedLon }
+  }
+
+  function poolForMode(mode) {
+    return (root.st.pool || []).filter(function (slug) {
+      var t = root.themeBySlug[slug]
+      return t && t.mode === mode
+    })
+  }
+
+  function findSlot(slots, id) {
+    for (var i = 0; i < slots.length; i++) if (slots[i].id === id) return slots[i]
+    return null
+  }
+
+  // The slot Sun.computeSchedule resolves as active right now, or null if
+  // there are no slots at all (shouldn't happen - normalizeSlots never
+  // empties the array - but keep callers safe).
+  function activeSlot() {
+    var sch = root.st.schedule
+    var loc = root.effectiveLocation()
+    return Sun.computeSchedule(sch.slots, loc.lat, loc.lon, new Date()).activeSlot
+  }
+
+  function updateSchedule(patch) {
+    var next = Deck.shallowClone(root.st)
+    next.schedule = Deck.shallowClone(root.st.schedule)
+    for (var k in patch) next.schedule[k] = patch[k]
+    root.setState(next)
+  }
+
+  function setScheduleEnabled(v) { root.updateSchedule({ enabled: v === true }) }
+  function setLocationMode(mode) { root.updateSchedule({ locationMode: mode === "manual" ? "manual" : "auto" }) }
+
+  function setManualLatitude(text) {
+    var v = parseFloat(text)
+    if (!isFinite(v)) return
+    root.updateSchedule({ latitude: Math.max(-90, Math.min(90, v)) })
+  }
+  function setManualLongitude(text) {
+    var v = parseFloat(text)
+    if (!isFinite(v)) return
+    root.updateSchedule({ longitude: Math.max(-180, Math.min(180, v)) })
+  }
+
+  function updateSlot(id, patch) {
+    var next = Deck.shallowClone(root.st)
+    next.schedule = Deck.shallowClone(root.st.schedule)
+    next.schedule.slots = root.st.schedule.slots.map(function (s) {
+      if (s.id !== id) return s
+      var merged = Deck.shallowClone(s)
+      for (var k in patch) merged[k] = patch[k]
+      return merged
+    })
+    root.setState(next)
+  }
+
+  function addSlot() {
+    var slots = root.st.schedule.slots
+    if (slots.length >= 6) return
+    var id = "slot-" + Date.now().toString(36) + "-" + Math.floor(Math.random() * 1000)
+    var next = Deck.shallowClone(root.st)
+    next.schedule = Deck.shallowClone(root.st.schedule)
+    next.schedule.slots = slots.concat([{
+      id: id, label: "New slot", mode: "dark", anchor: "sunset", offsetMin: 0, deck: [], lastAppliedSlug: ""
+    }])
+    root.setState(next)
+  }
+
+  function removeSlot(id) {
+    var slots = root.st.schedule.slots
+    if (slots.length <= 1) return
+    var next = Deck.shallowClone(root.st)
+    next.schedule = Deck.shallowClone(root.st.schedule)
+    next.schedule.slots = slots.filter(function (s) { return s.id !== id })
+    if (next.schedule.lastAppliedSlotId === id) next.schedule.lastAppliedSlotId = ""
+    root.setState(next)
+  }
+
+  // Draw (if needed) and apply the theme for one slot. `drawNew` forces a
+  // fresh pull from that slot's own no-repeat deck - a real boundary
+  // crossing, or an explicit Shuffle now / Reshuffle deck while that slot is
+  // active; otherwise this just reasserts whatever the slot last drew, so a
+  // plain shell restart mid-slot doesn't burn through its deck.
+  function applyForSlot(slotId, drawNew, quiet) {
+    var sch = root.st.schedule
+    var slot = root.findSlot(sch.slots, slotId)
+    if (!slot) return
+
+    var slug = slot.lastAppliedSlug
+    var newDeck = slot.deck
+
+    if (drawNew || !slug) {
+      var draw = Deck.drawNext({ deck: slot.deck, lastAppliedSlug: slot.lastAppliedSlug }, root.poolForMode(slot.mode))
+      if (!draw.slug) {
+        if (sch.notifiedEmptyModeFor !== slot.id) {
+          root.notify("OmaShuffle", "No " + slot.mode + " themes in your rotation for the \"" + slot.label + "\" slot")
+          root.updateSchedule({ notifiedEmptyModeFor: slot.id })
+        }
+        return
+      }
+      slug = draw.slug
+      newDeck = draw.deck
+    }
+
+    var next = Deck.shallowClone(root.st)
+    next.schedule = Deck.shallowClone(sch)
+    next.schedule.slots = sch.slots.map(function (s) {
+      if (s.id !== slot.id) return s
+      var s2 = Deck.shallowClone(s); s2.lastAppliedSlug = slug; s2.deck = newDeck; return s2
+    })
+    next.schedule.lastAppliedSlotId = slot.id
+    next.schedule.notifiedEmptyModeFor = ""   // the rotation produced a theme again - clear any stale warning
+    root.st = next
+    root.applyTheme(slug, true, quiet !== false)   // auto; quiet unless explicitly told otherwise
+  }
+
+  // Called at startup, whenever the weather-location read resolves, and
+  // every 60s while enabled (scheduleTimer). No-ops unless Day & Night is on.
+  function checkSchedule() {
+    var sch = root.st.schedule
+    if (!sch.enabled) return
+    // The theme scan is async and populates themeBySlug (and thus the
+    // per-mode pools). Until it lands there is nothing to reason about -
+    // ingestThemes() calls back here once it does.
+    if (root.themes.length === 0) return
+    var loc = root.effectiveLocation()
+    var result = Sun.computeSchedule(sch.slots, loc.lat, loc.lon, new Date())
+    if (!result.activeSlot) return
+
+    var now = Date.now()
+    if (sch.override.untilTs > 0 && sch.override.untilTs <= now) {
+      root.updateSchedule({ override: { slug: "", untilTs: 0 } })
+      sch = root.st.schedule
+    }
+    if (sch.override.untilTs > now) return   // a manual pick is still holding
+
+    var isNewActivation = sch.lastAppliedSlotId !== result.activeSlot.id
+    var driftedSinceRestart = !isNewActivation && result.activeSlot.lastAppliedSlug &&
+                               result.activeSlot.lastAppliedSlug !== root.currentThemeSlug
+    if (isNewActivation || driftedSinceRestart) {
+      root.applyForSlot(result.activeSlot.id, isNewActivation)
+    }
+  }
+
   // ============================================================ helpers
 
   function displayFor(slug) {
@@ -363,6 +615,7 @@ Item {
   }
   function isHex(s) { return typeof s === "string" && /^#[0-9a-fA-F]{3,8}$/.test(s) }
   function hexOr(s, dflt) { return root.isHex(s) ? s : dflt }
+  function pad2(n) { return (n < 10 ? "0" : "") + n }
 
   readonly property int maxThemes: 600
   readonly property int maxScanChars: 1048576
@@ -409,6 +662,9 @@ Item {
     })
     root.themes = clean
     root.themeBySlug = map
+    // The per-mode pools only become meaningful once this has run - re-check
+    // in case a Day & Night schedule was waiting on it at startup.
+    root.checkSchedule()
   }
 
   function filteredThemes() {
@@ -441,7 +697,7 @@ Item {
 
   function open(payloadJson) {
     root.opened = true
-    root.settingsOpen = false
+    root.panel = "picker"
     root.filterText = ""
     grid.currentIndex = 0
     if (!themeScanProc.running) themeScanProc.running = true
@@ -454,7 +710,7 @@ Item {
   // Open straight to the settings pane (menu sub-entry / keybind convenience).
   function settings() {
     root.open("{}")
-    root.settingsOpen = true
+    root.panel = "settings"
   }
 
   // ============================================================ UI
@@ -483,7 +739,7 @@ Item {
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function (event) {
         if (event.key === Qt.Key_Escape) {
-          if (root.settingsOpen) root.settingsOpen = false
+          if (root.panel !== "picker") root.panel = "picker"
           else root.close()
           event.accepted = true
         }
@@ -535,11 +791,24 @@ Item {
                 onClicked: root.setEnabled(!root.st.enabled)
               }
               Button {
-                iconText: String.fromCodePoint(0xF0493)
-                tooltipText: root.settingsOpen ? "Back" : "Settings"
+                text: root.st.schedule.enabled ? "Day & Night: on" : "Day & Night: off"
                 foreground: root.foreground; accent: root.accent
-                selected: root.settingsOpen
-                onClicked: root.settingsOpen = !root.settingsOpen
+                bordered: true; selected: root.st.schedule.enabled
+                onClicked: root.setScheduleEnabled(!root.st.schedule.enabled)
+              }
+              Button {
+                text: "Schedule"
+                tooltipText: root.panel === "schedule" ? "Back" : "Day & Night settings"
+                foreground: root.foreground; accent: root.accent
+                bordered: true; selected: root.panel === "schedule"
+                onClicked: root.panel = root.panel === "schedule" ? "picker" : "schedule"
+              }
+              Button {
+                iconText: String.fromCodePoint(0xF0493)
+                tooltipText: root.panel === "settings" ? "Back" : "Settings"
+                foreground: root.foreground; accent: root.accent
+                selected: root.panel === "settings"
+                onClicked: root.panel = root.panel === "settings" ? "picker" : "settings"
               }
               Button {
                 iconText: String.fromCodePoint(0xF0156)
@@ -558,6 +827,17 @@ Item {
             font.pixelSize: Style.font.caption
             text: {
               var cur = root.currentThemeSlug ? root.displayFor(root.currentThemeSlug) : "-"
+              if (root.st.schedule.enabled) {
+                var loc = root.effectiveLocation()
+                var sched = Sun.computeSchedule(root.st.schedule.slots, loc.lat, loc.lon, new Date())
+                var activeLabel = sched.activeSlot ? sched.activeSlot.label : "-"
+                var nextBit = "-"
+                if (sched.nextSlot && sched.nextBoundaryTs) {
+                  var d = new Date(sched.nextBoundaryTs)
+                  nextBit = sched.nextSlot.label + " at " + root.pad2(d.getHours()) + ":" + root.pad2(d.getMinutes())
+                }
+                return "Now: " + cur + " (" + activeLabel + ")        Next: " + nextBit
+              }
               var nxt = root.nextSlug ? root.displayFor(root.nextSlug)
                         : ((root.st.pool || []).length > 0 ? "a random pick from your rotation" : "nothing picked yet")
               return "Now: " + cur + "        Next boot: " + nxt
@@ -577,7 +857,7 @@ Item {
           Flickable {
             id: settingsFlick
             anchors.fill: parent
-            visible: root.settingsOpen
+            visible: root.panel === "settings"
             clip: true
             contentWidth: width
             contentHeight: settingsCol.implicitHeight
@@ -668,10 +948,174 @@ Item {
             }
           }
 
+          // ---- Day & Night view
+          Flickable {
+            id: scheduleFlick
+            anchors.fill: parent
+            visible: root.panel === "schedule"
+            clip: true
+            contentWidth: width
+            contentHeight: scheduleCol.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+
+            Column {
+              id: scheduleCol
+              width: scheduleFlick.width
+              spacing: Style.spacing.md
+
+              PanelSectionHeader { text: "DAY & NIGHT" }
+
+              Toggle {
+                width: parent.width
+                label: "Switch themes by time of day"
+                description: "Independent of boot shuffle - while this is on, each slot below applies a theme of its own from your rotation as its turn comes up."
+                checked: root.st.schedule.enabled
+                onClicked: root.setScheduleEnabled(!root.st.schedule.enabled)
+              }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                visible: root.st.schedule.enabled
+                color: Qt.darker(root.foreground, 1.3)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                text: {
+                  var loc = root.effectiveLocation()
+                  if (!isFinite(loc.lat) || !isFinite(loc.lon)) return "No location yet - enter coordinates below."
+                  var sched = Sun.computeSchedule(root.st.schedule.slots, loc.lat, loc.lon, new Date())
+                  if (!sched.activeSlot) return ""
+                  var line = sched.activeSlot.label + " is active now."
+                  if (sched.nextSlot && sched.nextBoundaryTs) {
+                    var d = new Date(sched.nextBoundaryTs)
+                    line += "  Next: " + sched.nextSlot.label + " at " + root.pad2(d.getHours()) + ":" + root.pad2(d.getMinutes())
+                  }
+                  return line
+                }
+              }
+
+              PanelSectionHeader { text: "LOCATION" }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                color: Qt.darker(root.foreground, 1.3)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                text: root.detectedLocationLabel || isFinite(root.detectedLat)
+                      ? "Detected from your Omarchy weather location: " +
+                        (root.detectedLocationLabel || (root.detectedLat.toFixed(2) + ", " + root.detectedLon.toFixed(2)))
+                      : "No weather location set - set one with omarchy-weather-location, or enter coordinates manually below."
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.sm
+                Button {
+                  text: "Auto (detected)"
+                  foreground: root.foreground; accent: root.accent; bordered: true
+                  selected: root.st.schedule.locationMode === "auto"
+                  onClicked: root.setLocationMode("auto")
+                }
+                Button {
+                  text: "Manual"
+                  foreground: root.foreground; accent: root.accent; bordered: true
+                  selected: root.st.schedule.locationMode === "manual"
+                  onClicked: root.setLocationMode("manual")
+                }
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.md
+                visible: root.st.schedule.locationMode === "manual"
+
+                TextField {
+                  id: latField
+                  width: Style.space(140)
+                  placeholderText: "Latitude"
+                  text: (typeof root.st.schedule.latitude === "number") ? String(root.st.schedule.latitude) : ""
+                  onEditingFinished: root.setManualLatitude(text)
+                }
+                TextField {
+                  id: lonField
+                  width: Style.space(140)
+                  placeholderText: "Longitude"
+                  text: (typeof root.st.schedule.longitude === "number") ? String(root.st.schedule.longitude) : ""
+                  onEditingFinished: root.setManualLongitude(text)
+                }
+              }
+
+              PanelSectionHeader { text: "SLOTS" }
+
+              Repeater {
+                model: root.st.schedule.slots
+
+                Column {
+                  width: scheduleCol.width
+                  spacing: Style.spacing.xs
+                  required property var modelData
+
+                  BorderSurface {
+                    width: parent.width
+                    height: slotRow.implicitHeight + Style.spacing.md * 2
+                    radius: Style.cornerRadius
+                    color: Util.alpha(root.foreground, 0.04)
+                    borderSpec: Border.flat(Color.menu.border, 1)
+
+                    Row {
+                      id: slotRow
+                      anchors.centerIn: parent
+                      width: parent.width - Style.spacing.md * 2
+                      spacing: Style.spacing.md
+
+                      TextField {
+                        width: Style.space(120)
+                        text: modelData.label
+                        onEditingFinished: root.updateSlot(modelData.id, { label: text.slice(0, 40) || modelData.id })
+                      }
+                      Dropdown {
+                        label: "Mode"
+                        options: [{ value: "light", label: "Light" }, { value: "dark", label: "Dark" }]
+                        value: modelData.mode
+                        onChanged: function (v) { root.updateSlot(modelData.id, { mode: v }) }
+                      }
+                      Dropdown {
+                        label: "Anchor"
+                        options: [{ value: "sunrise", label: "Sunrise" }, { value: "sunset", label: "Sunset" }]
+                        value: modelData.anchor
+                        onChanged: function (v) { root.updateSlot(modelData.id, { anchor: v }) }
+                      }
+                      NumberField {
+                        label: "Offset (min)"
+                        value: modelData.offsetMin
+                        from: -180; to: 180; stepSize: 5
+                        onModified: function (v) { root.updateSlot(modelData.id, { offsetMin: v }) }
+                      }
+                      Button {
+                        text: "Remove"
+                        foreground: root.foreground; accent: root.accent; bordered: true
+                        enabled: root.st.schedule.slots.length > 1
+                        onClicked: root.removeSlot(modelData.id)
+                      }
+                    }
+                  }
+                }
+              }
+
+              Button {
+                text: "Add slot"
+                foreground: root.foreground; accent: root.accent; bordered: true
+                enabled: root.st.schedule.slots.length < 6
+                onClicked: root.addSlot()
+              }
+            }
+          }
+
           // ---- picker view
           Item {
             anchors.fill: parent
-            visible: !root.settingsOpen
+            visible: root.panel === "picker"
 
             Flow {
               id: controls

@@ -4,10 +4,13 @@
 
 # OmaShuffle
 
-**A fresh [Omarchy](https://omarchy.org/) theme every time you boot.**
+**A fresh [Omarchy](https://omarchy.org/) theme every time you boot — or every
+sunrise and sunset.**
 
 Pick the themes you like once. From then on, every real boot deals you the next
-one from a shuffled deck — no repeats until you've seen them all.
+one from a shuffled deck — no repeats until you've seen them all. Turn on
+**Day & Night** and it switches by time of day instead: a light theme while
+the sun's up, a dark one once it's down.
 
 <img src="https://img.shields.io/badge/Omarchy-4.x-a855f7?style=flat-square" alt="Omarchy 4.x">
 <img src="https://img.shields.io/badge/kind-overlay-22d3ee?style=flat-square" alt="overlay plugin">
@@ -54,6 +57,35 @@ the kernel regenerates on every boot and keeps stable within one. So:
 Nothing here is a one-way door. It's a normal `omarchy theme set` under the
 hood — grab any theme by hand from the picker (or the usual `omarchy theme`
 command) whenever the deck deals you something you're not in the mood for.
+
+## Day & Night
+
+An independent, opt-in (off by default) alternative to boot shuffle: instead
+of one theme per boot, OmaShuffle switches by time of day. Turn it on from
+the **Schedule** tab.
+
+- **Slots.** Two by default — *Day* (a light theme, from sunrise) and
+  *Night* (a dark theme, from sunset) — each with its own no-repeat deck, so
+  "night" isn't the same theme every night. Add up to six total; each new
+  slot is explicitly tagged light or dark, anchored to sunrise or sunset,
+  with its own minute offset from that event.
+- **Location.** Reused from Omarchy's own weather location
+  (`omarchy-weather-location`) when it has coordinates — no setup needed. If
+  none is set, the tab asks for latitude/longitude directly; the actual
+  sunrise/sunset math is pure arithmetic, so this never makes a network call.
+- **Switching.** Instant, no notification — the exception is a slot whose
+  mode has no matching themes in your rotation, which notifies once and
+  leaves the current theme alone rather than switching to nothing useful.
+  Applied on every shell start and live the moment a boundary is crossed
+  (checked roughly once a minute).
+- **Manual picks still work.** Choosing a theme from the grid pauses Day &
+  Night until the next boundary — it doesn't fight you — and that pause
+  survives a shell restart.
+- **Shuffle now / Reshuffle deck** act on whichever slot is currently active
+  instead of the (dormant, while Day & Night is on) boot-shuffle deck.
+
+Turning Day & Night on doesn't touch boot shuffle's own toggle or deck; it
+just takes over deciding the applied theme until you turn it back off.
 
 ## Requirements
 
@@ -116,6 +148,8 @@ By hand, drop this into `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 | **Select all / none** | bulk-edit the rotation |
 | **All dark / All light** | add every dark (or light) theme to the rotation in one click |
 | **Boot shuffle: on / off** | the master switch for the once-per-boot behaviour |
+| **Day & Night: on / off** | the master switch for time-of-day switching (see below) |
+| **Schedule** | open the Day & Night tab — slots, offsets, location |
 | **Filter themes…** | narrow the grid by name |
 | gear icon | notifications, card transparency / corners / outline, menu entry |
 | `Esc` | close (or leave settings) |
@@ -134,6 +168,8 @@ Everything lives in one file:
 - `history` — the last 40 themes OmaShuffle applied, with timestamps
 - `lastBootId` — the `boot_id` at the last switch, i.e. the "was this a real
   boot" marker
+- `schedule` — Day & Night: on/off, location, its slots (each with its own
+  deck), and the manual-pick pause
 - a few UI prefs (notifications, card transparency / corners / outline)
 
 Delete the file to start over; disable the plugin to stop entirely.
@@ -164,8 +200,8 @@ Delete the file to start over; disable the plugin to stop entirely.
   `atomicWrites`.
 - **`bin/omashuffle-scan-themes`** enumerates the two standard theme directories
   and pulls hex values (and the `mode = "dark"|"light"` key, for the *All dark* /
-  *All light* buttons) out of each `colors.toml` with the bounded descriptor-safe
-  read above. It caps theme count, slug length, per-file bytes and total output,
+  *All light* buttons and the Day & Night slots) out of each `colors.toml` with
+  the bounded descriptor-safe read above. It caps theme count, slug length, per-file bytes and total output,
   runs under an outer `timeout`, and never executes anything a theme ships. A
   theme (which may be an installed third-party repo) cannot make it block or grow
   the shell.
@@ -179,13 +215,18 @@ Delete the file to start over; disable the plugin to stop entirely.
   unfamiliar.
 - **`python3`** is the only dependency beyond Omarchy — the two `bin/` scripts
   and the in-QML descriptor-safe readers.
+- **Day & Night** adds one more read, `~/.local/state/omarchy/settings/weather.json`
+  (written by Omarchy's own `omarchy-weather-location`, read the same
+  bounded/descriptor-safe way as `state.json`) as the default source of
+  latitude/longitude for sunrise/sunset, and does no I/O beyond that: the sun
+  position math in `SunTimes.js` is local arithmetic, never a network call.
+  Manual coordinates, if you enter them instead, stay in `state.json` like
+  everything else.
 
 ## Not included (by design)
 
 - No theme creation or editing — OmaShuffle only rotates themes that already
   exist. Use `omarchy theme` or a theme-designer plugin for that.
-- No schedule other than "once per real boot" — no hourly or daily rotation, no
-  time-of-day themes.
 - No wallpaper-only shuffle — it switches whole themes via `omarchy theme set`.
 - No background blur behind the picker card (transparency / corners / outline
   only, for now).
@@ -210,11 +251,13 @@ settings pane (*Remove menu entry*) or delete the `style.omashuffle` line from
 omarchy plugin validate ~/.config/omarchy/plugins/io.github.omashuffle
 python3 -m py_compile bin/omashuffle-menu-entry bin/omashuffle-scan-themes
 node --check <(tail -n +2 ThemeDeck.js)   # strip the .pragma line
+node --check <(tail -n +2 SunTimes.js)    # same, for the sun-position math
 omarchy restart shell                     # plugin QML is cached by URL
 ```
 
-`ThemeDeck.js` is pure logic with no QML or I/O dependencies — the easy place to
-reason about shuffling, the no-immediate-repeat rule, and slug validation.
+`ThemeDeck.js` and `SunTimes.js` are pure logic with no QML or I/O
+dependencies — the easy place to reason about shuffling, the no-immediate-
+repeat rule, slug validation, and sunrise/sunset math.
 
 ## License
 
