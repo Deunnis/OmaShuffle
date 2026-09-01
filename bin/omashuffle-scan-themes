@@ -3,7 +3,8 @@
 # omarchy:summary=List installed Omarchy themes with a small palette preview (read-only)
 #
 # Emits a JSON array, one object per installed theme:
-#   {"slug","source"("user"|"system"),"display","accent","background","foreground","colors":[hex,...]}
+#   {"slug","source"("user"|"system"),"display","mode"("dark"|"light"),
+#    "accent","background","foreground","colors":[hex,...]}
 #
 # Themes are read from the two standard locations; a user theme shadows a system
 # theme with the same slug. Every read is bounded and descriptor-safe: a theme
@@ -24,6 +25,7 @@ DEADLINE_SEC = 10
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 HEX_LINE_RE = re.compile(r'^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*"(#[0-9A-Fa-f]{3,8})"', re.M)
+MODE_LINE_RE = re.compile(r'^[ \t]*mode[ \t]*=[ \t]*"(dark|light)"', re.M | re.I)
 SWATCH_KEYS = ("red", "green", "blue", "yellow", "magenta", "cyan")
 
 
@@ -58,11 +60,28 @@ def read_palette(path):
     out = {}
     for key, value in HEX_LINE_RE.findall(text):
         out.setdefault(key, value)
+    m = MODE_LINE_RE.search(text)
+    if m:
+        out["mode"] = m.group(1).lower()
     return out
 
 
 def display_name(slug):
     return " ".join(w.capitalize() for w in re.split(r"[-_]", slug) if w)
+
+
+def theme_mode(palette):
+    """The theme's own `mode` key when it has one, else inferred from the
+    perceived luminance of its background colour. Defaults to "dark"."""
+    mode = palette.get("mode", "")
+    if mode in ("dark", "light"):
+        return mode
+    m = re.match(r"^#?([0-9A-Fa-f]{6})$", palette.get("background", "") or "")
+    if not m:
+        return "dark"
+    v = int(m.group(1), 16)
+    r, g, b = (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF
+    return "light" if (0.2126 * r + 0.7152 * g + 0.0722 * b) > 128 else "dark"
 
 
 def main():
@@ -97,6 +116,7 @@ def main():
                 "slug": name,
                 "source": source,
                 "display": display_name(name),
+                "mode": theme_mode(palette),
                 "accent": palette.get("accent", ""),
                 "background": palette.get("background", ""),
                 "foreground": palette.get("foreground", ""),

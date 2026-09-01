@@ -316,6 +316,30 @@ Item {
     root.setState(next)
   }
 
+  // Add every installed theme of one mode ("dark" / "light") to the rotation,
+  // leaving anything already picked in place. Additive, so "All dark" then
+  // "All light" ends up with everything.
+  function selectByMode(mode) {
+    if (root.themes.length === 0) return
+    var pool = (root.st.pool || []).slice()
+    var matched = 0, added = 0
+    for (var i = 0; i < root.themes.length; i++) {
+      var t = root.themes[i]
+      if (t.mode !== mode) continue
+      matched++
+      if (pool.indexOf(t.slug) === -1) { pool.push(t.slug); added++ }
+    }
+    if (added === 0) {
+      root.notify("OmaShuffle", matched === 0 ? "No " + mode + " themes installed"
+                                              : "Every " + mode + " theme is already in the rotation")
+      return
+    }
+    var next = Deck.shallowClone(root.st)
+    next.pool = pool
+    next.poolInitialized = true
+    root.setState(next)
+  }
+
   function setEnabled(v) { var n = Deck.shallowClone(root.st); n.enabled = v === true; root.setState(n) }
   function setNotify(v) { var n = Deck.shallowClone(root.st); n.notify = v === true; root.setState(n) }
   function commitChrome(key, value) { var n = Deck.shallowClone(root.st); n[key] = Math.round(value); root.setState(n) }
@@ -362,6 +386,7 @@ Item {
         slug: slug,
         source: (t.source === "user") ? "user" : "system",
         display: (typeof t.display === "string" && t.display) ? String(t.display).slice(0, 120) : slug,
+        mode: (t.mode === "light") ? "light" : "dark",
         accent: root.hexOr(t.accent, ""),
         background: root.hexOr(t.background, ""),
         foreground: root.hexOr(t.foreground, ""),
@@ -679,6 +704,18 @@ Item {
                 text: "Select none"
                 foreground: root.foreground; accent: root.accent; bordered: true
                 onClicked: root.selectNone()
+              }
+              Button {
+                text: "All dark"
+                tooltipText: "Add every dark theme to the rotation"
+                foreground: root.foreground; accent: root.accent; bordered: true
+                onClicked: root.selectByMode("dark")
+              }
+              Button {
+                text: "All light"
+                tooltipText: "Add every light theme to the rotation"
+                foreground: root.foreground; accent: root.accent; bordered: true
+                onClicked: root.selectByMode("light")
               }
             }
 

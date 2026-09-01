@@ -114,6 +114,7 @@ By hand, drop this into `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 | **Shuffle now** | jump straight to the next deck theme |
 | **Reshuffle deck** | throw out the current order and draw a fresh shuffle |
 | **Select all / none** | bulk-edit the rotation |
+| **All dark / All light** | add every dark (or light) theme to the rotation in one click |
 | **Boot shuffle: on / off** | the master switch for the once-per-boot behaviour |
 | **Filter themes…** | narrow the grid by name |
 | gear icon | notifications, card transparency / corners / outline, menu entry |
@@ -162,7 +163,8 @@ Delete the file to start over; disable the plugin to stop entirely.
   FIFO or symlink is refused. `state.json` writes go through `FileView` with
   `atomicWrites`.
 - **`bin/omashuffle-scan-themes`** enumerates the two standard theme directories
-  and pulls hex values out of each `colors.toml` with the bounded descriptor-safe
+  and pulls hex values (and the `mode = "dark"|"light"` key, for the *All dark* /
+  *All light* buttons) out of each `colors.toml` with the bounded descriptor-safe
   read above. It caps theme count, slug length, per-file bytes and total output,
   runs under an outer `timeout`, and never executes anything a theme ships. A
   theme (which may be an installed third-party repo) cannot make it block or grow
