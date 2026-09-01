@@ -8,8 +8,8 @@ var MAX_HISTORY = 40
 var MAX_POOL = 500      // far above any real installed-theme count; a sanity cap
 var SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/
 var MAX_SLOTS = 6        // Day & Night slots; plenty for morning/day/evening/night + a couple more
-var MIN_OFFSET_MIN = -180
-var MAX_OFFSET_MIN = 180
+var MIN_OFFSET_MIN = -720   // a slot can sit up to 12h either side of its sun anchor
+var MAX_OFFSET_MIN = 720
 
 // omarchy-theme-set's own rules: lowercase, no leading dot, no slash.
 function sanitizeSlug(s) {

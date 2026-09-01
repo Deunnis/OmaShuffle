@@ -695,9 +695,18 @@ Item {
 
   // ============================================================ IPC surface
 
+  // Optional payload: {"panel": "picker" | "settings" | "schedule"} opens
+  // straight to that view (menu sub-entry / keybind convenience).
   function open(payloadJson) {
+    var want = "picker"
+    if (payloadJson) {
+      try {
+        var p = JSON.parse(payloadJson)
+        if (p && (p.panel === "settings" || p.panel === "schedule")) want = p.panel
+      } catch (e) {}
+    }
     root.opened = true
-    root.panel = "picker"
+    root.panel = want
     root.filterText = ""
     grid.currentIndex = 0
     if (!themeScanProc.running) themeScanProc.running = true
@@ -707,11 +716,9 @@ Item {
   function close() { root.opened = false }
   function toggle() { if (root.opened) root.close(); else root.open("{}") }
 
-  // Open straight to the settings pane (menu sub-entry / keybind convenience).
-  function settings() {
-    root.open("{}")
-    root.panel = "settings"
-  }
+  // Open straight to a specific tab (menu sub-entry / keybind convenience).
+  function settings() { root.open('{"panel":"settings"}') }
+  function schedule() { root.open('{"panel":"schedule"}') }
 
   // ============================================================ UI
 
@@ -1089,7 +1096,7 @@ Item {
                       NumberField {
                         label: "Offset (min)"
                         value: modelData.offsetMin
-                        from: -180; to: 180; stepSize: 5
+                        from: -720; to: 720; stepSize: 15
                         onModified: function (v) { root.updateSlot(modelData.id, { offsetMin: v }) }
                       }
                       Button {
