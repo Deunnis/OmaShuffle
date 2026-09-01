@@ -78,11 +78,15 @@ the **Schedule** tab.
 - **Switching.** Instant, no notification — the exception is a slot whose
   mode has no matching themes in your rotation, which notifies once and
   leaves the current theme alone rather than switching to nothing useful.
-  Applied on every shell start and live the moment a boundary is crossed
-  (checked roughly once a minute).
-- **Manual picks still work.** Choosing a theme from the grid pauses Day &
-  Night until the next boundary — it doesn't fight you — and that pause
-  survives a shell restart.
+  It switches only when a slot boundary is actually crossed (checked roughly
+  once a minute, and once at startup to catch a boundary you were off/asleep
+  for). A plain shell restart mid-slot changes nothing — a theme you set by
+  hand, with the picker or `omarchy theme`, is never undone.
+- **No location, no switching.** Until Omarchy knows your coordinates (or you
+  enter them in the tab), Day & Night stays completely inert even when it's
+  toggled on.
+- **Manual picks from the grid** pause Day & Night until the next boundary —
+  it doesn't fight you — and that pause survives a shell restart.
 - **Shuffle now / Reshuffle deck** act on whichever slot is currently active
   instead of the (dormant, while Day & Night is on) boot-shuffle deck.
 

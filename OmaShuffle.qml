@@ -493,18 +493,20 @@ Item {
     root.setState(next)
   }
 
-  function setScheduleEnabled(v) { root.updateSchedule({ enabled: v === true }) }
-  function setLocationMode(mode) { root.updateSchedule({ locationMode: mode === "manual" ? "manual" : "auto" }) }
+  function setScheduleEnabled(v) { root.updateSchedule({ enabled: v === true }); root.checkSchedule() }
+  function setLocationMode(mode) { root.updateSchedule({ locationMode: mode === "manual" ? "manual" : "auto" }); root.checkSchedule() }
 
   function setManualLatitude(text) {
     var v = parseFloat(text)
     if (!isFinite(v)) return
     root.updateSchedule({ latitude: Math.max(-90, Math.min(90, v)) })
+    root.checkSchedule()
   }
   function setManualLongitude(text) {
     var v = parseFloat(text)
     if (!isFinite(v)) return
     root.updateSchedule({ longitude: Math.max(-180, Math.min(180, v)) })
+    root.checkSchedule()
   }
 
   function updateSlot(id, patch) {
@@ -541,11 +543,10 @@ Item {
     root.setState(next)
   }
 
-  // Draw (if needed) and apply the theme for one slot. `drawNew` forces a
-  // fresh pull from that slot's own no-repeat deck - a real boundary
-  // crossing, or an explicit Shuffle now / Reshuffle deck while that slot is
-  // active; otherwise this just reasserts whatever the slot last drew, so a
-  // plain shell restart mid-slot doesn't burn through its deck.
+  // Draw and apply the theme for one slot. `drawNew` pulls a fresh theme
+  // from that slot's own no-repeat deck (a boundary crossing, or an explicit
+  // Shuffle now); with drawNew false it reasserts the slot's last theme, only
+  // drawing if the slot has never run.
   function applyForSlot(slotId, drawNew, quiet) {
     var sch = root.st.schedule
     var slot = root.findSlot(sch.slots, slotId)
@@ -588,7 +589,13 @@ Item {
     // per-mode pools). Until it lands there is nothing to reason about -
     // ingestThemes() calls back here once it does.
     if (root.themes.length === 0) return
+
     var loc = root.effectiveLocation()
+    // No usable coordinates -> there is no schedule to run. Do nothing at all
+    // (don't pin a slot, don't touch the theme); the Schedule tab prompts for
+    // a location.
+    if (!isFinite(loc.lat) || !isFinite(loc.lon)) return
+
     var result = Sun.computeSchedule(sch.slots, loc.lat, loc.lon, new Date())
     if (!result.activeSlot) return
 
@@ -599,11 +606,12 @@ Item {
     }
     if (sch.override.untilTs > now) return   // a manual pick is still holding
 
-    var isNewActivation = sch.lastAppliedSlotId !== result.activeSlot.id
-    var driftedSinceRestart = !isNewActivation && result.activeSlot.lastAppliedSlug &&
-                               result.activeSlot.lastAppliedSlug !== root.currentThemeSlug
-    if (isNewActivation || driftedSinceRestart) {
-      root.applyForSlot(result.activeSlot.id, isNewActivation)
+    // Only switch when the active slot actually changes - a real boundary
+    // crossing, or the first run after enabling / a reboot that skipped one.
+    // A plain shell restart mid-slot leaves the current theme alone, so a
+    // theme you set by hand (picker or `omarchy theme`) is never undone.
+    if (sch.lastAppliedSlotId !== result.activeSlot.id) {
+      root.applyForSlot(result.activeSlot.id, true)
     }
   }
 

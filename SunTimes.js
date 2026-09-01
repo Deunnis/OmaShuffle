@@ -93,10 +93,9 @@ var DAY_MS = 86400000
 // Resolve which slot is active right now, and when the next one starts.
 // Looks at yesterday/today/tomorrow's boundaries for every slot so midnight
 // wraparound (e.g. a night slot whose boundary falls before midnight) works
-// without special-casing. Never leaves activeSlot undefined when there is
-// at least one slot - falls back to the first slot (with no real schedule)
-// if the sun math produced nothing usable at all (no location yet, or every
-// slot's anchor is a polar edge case).
+// without special-casing. activeSlot is null when there is no schedule to
+// run - no slots, no/invalid coordinates, or a polar edge case where none of
+// the slot anchors happen. Callers treat null as "do nothing".
 function computeSchedule(slots, lat, lon, now) {
   var list = Array.isArray(slots) ? slots : []
   if (list.length === 0) return { activeSlot: null, nextSlot: null, nextBoundaryTs: 0 }
@@ -111,7 +110,7 @@ function computeSchedule(slots, lat, lon, now) {
   }
 
   if (boundaries.length === 0) {
-    return { activeSlot: list[0], nextSlot: list[0], nextBoundaryTs: 0 }
+    return { activeSlot: null, nextSlot: null, nextBoundaryTs: 0 }
   }
 
   boundaries.sort(function (a, b) { return a.ts - b.ts })
