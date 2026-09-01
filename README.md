@@ -19,7 +19,7 @@ the sun's up, a dark one once it's down.
 
 <br><br>
 
-<img src="screenshots/picker.png" alt="The OmaShuffle picker: a grid of every installed theme with palette swatches, some ticked into the rotation" width="860">
+<img src="screenshots/picker.png" alt="The OmaShuffle picker: a grid of every installed theme with palette swatches, some ticked into the rotation; the header carries Boot shuffle, Day & Night and Schedule controls" width="860">
 
 </div>
 
@@ -63,6 +63,8 @@ command) whenever the deck deals you something you're not in the mood for.
 An independent, opt-in (off by default) alternative to boot shuffle: instead
 of one theme per boot, OmaShuffle switches by time of day. Turn it on from
 the **Schedule** tab.
+
+<img src="screenshots/schedule.png" alt="The OmaShuffle Schedule tab: a Switch themes by time of day toggle, a manual latitude/longitude location, and three slots (Day, Afternoon, Evening) each with a light/dark mode, a sunrise/sunset anchor, and a minute offset" width="760">
 
 - **Slots.** Two by default — *Day* (a light theme, from sunrise) and
   *Night* (a dark theme, from sunset) — each with its own no-repeat deck, so
