@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.omashuffle",
   "name": "OmaShuffle",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Deunnis",
   "license": "MIT",
   "description": "Applies a different theme on every real boot, or by time of day via an optional Day & Night schedule, drawn from a shuffled deck of themes you curate. Fullscreen picker opened from the Omarchy menu; every switch stays fully reversible.",

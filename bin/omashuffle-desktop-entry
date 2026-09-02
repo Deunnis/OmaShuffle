@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+
+# omarchy:summary=Install or remove OmaShuffle's app-launcher entry
+# omarchy:group=omashuffle
+#
+# Companion to Service.qml. `--add` writes
+# ~/.local/share/applications/omashuffle.desktop from the bundled template
+# (filling in the icon path); `--remove` deletes it. Only ever touches a file
+# that is absent or carries the X-OmaShuffle-Managed=true marker, so a launcher
+# entry you wrote yourself at that path is left alone.
+#
+# Every file is opened as a bounded, regular, non-symlink file; the write goes
+# to a fresh O_EXCL temp inode in a verified directory and is atomically
+# renamed over the target (never written through). Runs as the current user;
+# no elevation, no network. Same discipline as bin/omashuffle-menu-entry.
+
+import os
+import stat
+import sys
+import tempfile
+
+HOME = os.path.expanduser("~")
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+TEMPLATE = os.path.join(PLUGIN_DIR, "omashuffle.desktop")
+ICON = os.path.join(PLUGIN_DIR, "icon.png")
+DEST = os.environ.get(
+    "OMASHUFFLE_DESKTOP_FILE",
+    os.path.join(HOME, ".local", "share", "applications", "omashuffle.desktop"),
+)
+MARKER = b"X-OmaShuffle-Managed=true"
+MAX_BYTES = 64 * 1024
+
+
+def read_regular(path, limit):
+    """Bounded read of a regular file. Never follows a symlink at the final
+    component, never blocks on a FIFO. Returns bytes, or None if the path is
+    absent or is anything other than a normal file within the size cap."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, total = [], 0
+        while total <= limit:
+            try:
+                b = os.read(fd, (limit + 1) - total)
+            except BlockingIOError:
+                break
+            if not b:
+                break
+            chunks.append(b)
+            total += len(b)
+        if total > limit:
+            return None
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def dest_is_ours_or_absent():
+    """True only if DEST does not exist at all, or is a regular file carrying
+    the marker. A symlink / FIFO / directory / foreign file all read as
+    'not ours' and are left untouched."""
+    data = read_regular(DEST, MAX_BYTES)
+    if data is not None:
+        return MARKER in data
+    return not os.path.lexists(DEST)
+
+
+def atomic_write(target, data, mode=0o644):
+    directory = os.path.dirname(target)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        return
+    st = os.lstat(directory)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        return
+    fd, tmp = tempfile.mkstemp(prefix=".omashuffle-", dir=directory)
+    try:
+        os.write(fd, data)
+        os.fchmod(fd, mode)
+        os.close(fd)
+        fd = -1
+        os.replace(tmp, target)   # replaces the link itself, never follows it
+    except BaseException:
+        if fd != -1:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def do_add():
+    template = read_regular(TEMPLATE, MAX_BYTES)
+    if template is None or not dest_is_ours_or_absent():
+        return
+    content = template.replace(b"@ICON@", ICON.encode("utf-8"))
+    if content != read_regular(DEST, MAX_BYTES):
+        atomic_write(DEST, content)
+
+
+def do_remove():
+    data = read_regular(DEST, MAX_BYTES)
+    if data is None or MARKER not in data:
+        return
+    try:
+        os.unlink(DEST)   # removes this directory entry; if it is now a
+    except OSError:        # symlink, only the link goes, never its target
+        pass
+
+
+def main(argv):
+    arg = argv[1] if len(argv) > 1 else ""
+    if arg == "--add":
+        do_add()
+        return 0
+    if arg == "--remove":
+        do_remove()
+        return 0
+    print("Usage: omashuffle-desktop-entry [--add | --remove]", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

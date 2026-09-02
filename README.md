@@ -188,12 +188,18 @@ Delete the file to start over; disable the plugin to stop entirely.
   and manages no packages or services.
 - **`Service.qml`** writes one file: `~/.local/share/applications/omashuffle.desktop`,
   a launcher entry pointing at `omarchy-shell shell toggle io.github.omashuffle`.
-  It copies the bundled `omashuffle.desktop` template (substituting the icon
-  path) only when the destination is absent or already carries the
-  `X-OmaShuffle-Managed=true` marker, writing through a temp file in the same
-  directory and swapping it in only on a real content change. On disable/remove
-  it deletes that file, again only if the marker is present. This mirrors how
-  Omaland registers its launcher entry.
+  All the file work is delegated to **`bin/omashuffle-desktop-entry`**, which
+  holds itself to the same discipline as `bin/omashuffle-menu-entry`: it reads
+  the bundled `omashuffle.desktop` template and the existing destination with
+  the bounded `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` + `S_ISREG` read below,
+  proceeds only when the destination is absent or already carries the
+  `X-OmaShuffle-Managed=true` marker (a symlink, FIFO, directory or foreign
+  file all read as "not ours" and are left alone), writes the icon-substituted
+  contents to a fresh `mkstemp` `O_EXCL` inode in the verified target directory,
+  and `os.replace`s that over the destination — which replaces a symlink at the
+  path rather than following it, so nothing is ever written through one. On
+  disable/remove it `unlink`s the file only when it is a regular file carrying
+  the marker. This mirrors how Omaland registers its launcher entry.
 - **Theme slugs are validated** in `ThemeDeck.js` (`^[a-z0-9][a-z0-9._-]*$`, no
   `/`, no `..`, length-capped) before they are ever passed to
   `omarchy theme set`, on top of that command's own checks.
@@ -219,7 +225,7 @@ Delete the file to start over; disable the plugin to stop entirely.
   `os.replace`s it over the target without following a symlink there. It only
   ever touches a row it owns, and bails without writing if the file layout is
   unfamiliar.
-- **`python3`** is the only dependency beyond Omarchy — the two `bin/` scripts
+- **`python3`** is the only dependency beyond Omarchy — the three `bin/` scripts
   and the in-QML descriptor-safe readers.
 - **Day & Night** adds one more read, `~/.local/state/omarchy/settings/weather.json`
   (written by Omarchy's own `omarchy-weather-location`, read the same
@@ -255,7 +261,7 @@ settings pane (*Remove menu entry*) or delete the `style.omashuffle` line from
 
 ```bash
 omarchy plugin validate ~/.config/omarchy/plugins/io.github.omashuffle
-python3 -m py_compile bin/omashuffle-menu-entry bin/omashuffle-scan-themes
+python3 -m py_compile bin/omashuffle-menu-entry bin/omashuffle-scan-themes bin/omashuffle-desktop-entry
 node --check <(tail -n +2 ThemeDeck.js)   # strip the .pragma line
 node --check <(tail -n +2 SunTimes.js)    # same, for the sun-position math
 omarchy restart shell                     # plugin QML is cached by URL
