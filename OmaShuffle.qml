@@ -33,6 +33,10 @@ Item {
   property bool stateLoaded: false
   property string currentBootId: ""
   property bool bootChecked: false
+  // Set by maybeBootSwitch() on a genuine new boot while Day & Night is on;
+  // checkSchedule() consumes it to redraw the active slot once the theme
+  // scan and location have resolved.
+  property bool bootReshufflePending: false
 
   property var themes: []
   property var themeBySlug: ({})
@@ -258,10 +262,22 @@ Item {
     var next = Deck.shallowClone(root.st)
     next.lastBootId = root.currentBootId
 
-    // Boot-shuffle's own top-level draw is dormant while Day & Night is on -
-    // checkSchedule() decides the applied theme in that case, and its own
-    // per-slot decks are where the "shuffle" comes from instead.
-    if (!root.st.enabled || root.st.schedule.enabled) { root.setState(next); return }
+    // Boot-shuffle's own top-level draw is dormant while Day & Night is on,
+    // but a genuine new boot still asks the active slot for a fresh theme -
+    // the same "new look when I sit back down" the plain boot-shuffle gives.
+    // checkSchedule() does the draw once the theme scan and location have
+    // resolved (cued by bootReshufflePending); its per-slot decks are where
+    // the "shuffle" comes from. Any lingering manual-pick override is
+    // dropped here - a real reboot is a clean slate.
+    if (root.st.schedule.enabled) {
+      next.schedule = Deck.shallowClone(next.schedule)
+      next.schedule.override = { slug: "", untilTs: 0 }
+      root.bootReshufflePending = true
+      root.setState(next)
+      root.checkSchedule()
+      return
+    }
+    if (!root.st.enabled) { root.setState(next); return }
 
     var draw = Deck.drawNext(root.st, root.st.pool)
     if (!draw.slug) {
@@ -602,16 +618,32 @@ Item {
     if (!result.activeSlot) return
 
     var now = Date.now()
+    // Drop an override whose theme is no longer the one applied - a "Shuffle
+    // now" or a boot reshuffle has run since the manual pick that set it, so
+    // it is stale and would otherwise freeze switching until its untilTs.
+    if (sch.override.slug && sch.override.slug !== root.st.lastAppliedSlug) {
+      root.updateSchedule({ override: { slug: "", untilTs: 0 } })
+      sch = root.st.schedule
+    }
     if (sch.override.untilTs > 0 && sch.override.untilTs <= now) {
       root.updateSchedule({ override: { slug: "", untilTs: 0 } })
       sch = root.st.schedule
     }
     if (sch.override.untilTs > now) return   // a manual pick is still holding
 
-    // Only switch when the active slot actually changes - a real boundary
-    // crossing, or the first run after enabling / a reboot that skipped one.
-    // A plain shell restart mid-slot leaves the current theme alone, so a
-    // theme you set by hand (picker or `omarchy theme`) is never undone.
+    // A genuine new boot redraws the active slot even if it is the same slot
+    // as last run - a reboot should feel like a fresh theme, not a resume.
+    if (root.bootReshufflePending) {
+      root.bootReshufflePending = false
+      root.applyForSlot(result.activeSlot.id, true)
+      return
+    }
+
+    // Otherwise only switch when the active slot actually changes - a real
+    // boundary crossing, or the first run after enabling / a reboot that
+    // skipped one. A plain shell restart mid-slot leaves the current theme
+    // alone, so a theme you set by hand (picker or `omarchy theme`) is never
+    // undone.
     if (sch.lastAppliedSlotId !== result.activeSlot.id) {
       root.applyForSlot(result.activeSlot.id, true)
     }
